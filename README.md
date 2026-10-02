@@ -18,7 +18,7 @@ AI エージェントは、目の前の問題をその場で直し始めがち�
 マーケットプレイスとして追加する場合:
 
 ```text
-/plugin marketplace add ymsaki/cc-lightpm
+/plugin marketplace add YmSaki/cc-LightPM
 /plugin install lightpm@cc-lightpm
 ```
 
