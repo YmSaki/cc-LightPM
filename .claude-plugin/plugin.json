@@ -1,7 +1,7 @@
 {
   "name": "lightpm",
   "version": "0.1.0",
-  "description": "リリースフェーズ（Alpha → Beta → RC → GM）と優先度（max〜xlow）から「次にやる作業」を規則で1件に決め、今やらない作業は後回しとして管理する",
+  "description": "Claude Code で進めるプロジェクトのタスクを優先度（max〜xlow）で管理し、一覧と進捗をユーザーに見えるようにする",
   "author": { "name": "ymsaki" },
   "license": "GPL-3.0",
   "keywords": ["project-management", "priority", "task", "mod"],

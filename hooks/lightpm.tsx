@@ -4,12 +4,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { PHASE_LABEL, bandText, boardRows, contextFor, formatComplete, formatList, formatNext, formatPolicy, formatStatus, formatWhy, summarize } from '../src/core/format.ts'
-import type { Summary } from '../src/core/format.ts'
-import { InputError, addTask, completeTask, setPhase, updateTask } from '../src/core/ops.ts'
-import { nextTask } from '../src/core/select.ts'
-import { PHASES } from '../src/core/types.ts'
-import type { Phase } from '../src/core/types.ts'
+import { bandText, boardRows, contextFor, formatList, formatSaved, formatShow, formatWhy, summarize } from '../src/core/format.ts'
+import type { ListFilter, Summary } from '../src/core/format.ts'
+import { InputError, addTask, updateTask } from '../src/core/ops.ts'
+import { STATUSES } from '../src/core/types.ts'
 import { Repo } from '../src/io/repo.ts'
 import type { Loaded } from '../src/io/repo.ts'
 import type { LightpmBoardRow, LightpmSummary } from '../types'
@@ -20,6 +18,7 @@ const SUMMARY = { plugin: 'lightpm', key: 'summary' } as const
 const summaryAtom = atom(SUMMARY, null)
 const boardAtom = atom({ plugin: 'lightpm', key: 'board' } as const, [])
 const expandedAtom = atom({ plugin: 'lightpm', key: 'expanded' } as const, [])
+const showDoneAtom = atom({ plugin: 'lightpm', key: 'showDone' } as const, false)
 
 /** タスク一覧のペイン。 */
 const PANE = 'lightpm-tasks'
@@ -31,72 +30,65 @@ const NOT_INITIALIZED =
 // ---- ツールの定義 ----
 
 const PRIORITY = { type: 'string', enum: ['max', 'xhigh', 'high', 'mid', 'low', 'xlow'] }
-const KIND = { type: 'string', enum: ['feature', 'bug', 'refactor', 'polish', 'chore', 'release'] }
-const SEVERITY = { type: 'string', enum: ['S0', 'S1', 'S2', 'S3'] }
 const STRINGS = { type: 'array', items: { type: 'string' } }
+const NUMBERS = { type: 'array', items: { type: 'integer' } }
 
 const TASK_FIELDS = {
   title: { type: 'string', description: '1行のタイトル' },
-  kind: KIND,
+  kind: { type: 'string', enum: ['feature', 'bug', 'refactor', 'polish', 'chore', 'release'] },
   priority: { ...PRIORITY, description: 'ルーブリックで判定した優先度。bug で impacts が既存タスクなら、表から自動で決まる' },
-  severity: { ...SEVERITY, description: 'bug で必須。S0=データ損失/クラッシュ/セキュリティ, S1=機能が使えない, S2=回避策のある劣化, S3=外観・軽微' },
+  severity: {
+    type: 'string',
+    enum: ['S0', 'S1', 'S2', 'S3'],
+    description: 'bug で必須。S0=データ損失/クラッシュ/セキュリティ, S1=機能が使えない, S2=回避策のある劣化, S3=外観・軽微',
+  },
   impacts: { type: 'string', description: 'bug で必須。影響を受けるタスク ID（T-0003）か機能名' },
   impact_priority: { ...PRIORITY, description: 'impacts が機能名のとき、その機能の優先度（バグの表に使う）' },
-  depends_on: { ...STRINGS, description: '実装上の前提になるタスク ID。「優先度が高いから先に」は依存ではない' },
-  scope_paths: { ...STRINGS, description: '主に触るファイルやディレクトリの目安（ルートからの相対、glob 可）。作業する側への手がかり' },
-  acceptance: { ...STRINGS, description: '完了条件。1つ以上' },
-  non_goals: { ...STRINGS, description: '紛らわしいときだけ、このタスクに含めないもの' },
-  estimate: { type: 'string', enum: ['S', 'M', 'L'] },
-  release_blocker: { type: 'boolean', description: 'リリースを阻害するバグか' },
-  body: { type: 'string', description: '背景や再現手順（自由記述）' },
-  reason: { type: 'string', description: '分類の理由（1文）。監査ログに残る' },
+  body: { type: 'string', description: '何をするタスクかの説明' },
+  checklist: { ...STRINGS, description: 'やること。項目ごとに済みにして進捗を表す' },
+  depends_on: { ...STRINGS, description: '前提になるタスク ID。一覧に表示するだけで、並び順には影響しない' },
 }
 
 const TOOLS = [
   {
-    name: 'pm_status',
-    description: 'LightPM: 現在のフェーズ、作業中のタスク、todo と後回しの一覧、フェーズを抜ける条件を返す。状態は変えない。',
-    inputSchema: { type: 'object', properties: {} },
+    name: 'pm_list',
+    description: 'LightPM: どんなタスクがあるかを、状態ごとに優先度の高い順で返す。既定は未完了（作業中と未着手）だけ。',
+    inputSchema: {
+      type: 'object',
+      properties: { status: { type: 'string', enum: ['open', 'all', ...STATUSES], description: '既定は open（作業中と未着手）' } },
+    },
   },
   {
-    name: 'pm_next',
-    description:
-      'LightPM: 次に着手するタスクを規則で1件決め、作業中（in_progress）にして内容を返す。作業中のタスクがあればそれを返す。着手できるタスクがなければ「待ち」、プロジェクトが終わっていれば「完了」を返す。',
-    inputSchema: { type: 'object', properties: {} },
+    name: 'pm_show',
+    description: 'LightPM: タスクの内容（説明、やることのチェックリストと進捗、前提、メモ）を返す。',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'タスク ID（T-0001）' } }, required: ['id'] },
   },
   {
     name: 'pm_add',
-    description:
-      'LightPM: タスクを1件登録する。作業中に気づいた別の作業もこれで登録すれば、優先度順に回ってくる。今のフェーズで着手しないものは自動で後回し（deferred）になる。.pm/ がなければ作る。',
-    inputSchema: { type: 'object', properties: TASK_FIELDS, required: ['title', 'kind', 'acceptance'] },
+    description: 'LightPM: タスクを1件登録する。作業中に気づいた別の作業もこれで登録する。.pm/ がなければ作る。',
+    inputSchema: {
+      type: 'object',
+      properties: { ...TASK_FIELDS, reason: { type: 'string', description: 'その優先度にした理由（1文）。変更履歴に残る' } },
+      required: ['title', 'kind', 'checklist'],
+    },
   },
   {
     name: 'pm_update',
     description:
-      'LightPM: タスクを更新・再分類する（理由は必須、監査ログに旧値と新値が残る）。status は todo（差し戻し）か dropped（取り下げ）だけ。完了は pm_complete で行う。',
+      'LightPM: タスクの進捗や内容を更新する。check / uncheck でやることの項目（1 から数える番号）を済みにしたり戻したりする。status を指定しなければ、項目を済みにすると作業中に、全部済むと完了になる。種別や優先度を変えるときは reason が必須。',
     inputSchema: {
       type: 'object',
       properties: {
         id: { type: 'string', description: 'タスク ID（T-0001）' },
+        check: { ...NUMBERS, description: '済みにする項目の番号（1 から）' },
+        uncheck: { ...NUMBERS, description: '済みを戻す項目の番号（1 から）' },
+        status: { type: 'string', enum: [...STATUSES], description: 'todo / in_progress / done / dropped（取り下げ）' },
         ...TASK_FIELDS,
-        reason: { type: 'string', description: '変更の理由（必須）' },
-        status: { type: 'string', enum: ['todo', 'dropped'] },
-        notes: { type: 'string', description: '失敗の記録などのメモ' },
+        checklist: { ...STRINGS, description: 'やることを置き換える。同じ文面の項目は済みの印を引き継ぐ' },
+        notes: { type: 'string', description: '今の状況のメモ' },
+        reason: { type: 'string', description: '変更の理由。種別や優先度を変えるときは必須' },
       },
-      required: ['id', 'reason'],
-    },
-  },
-  {
-    name: 'pm_complete',
-    description:
-      'LightPM: タスクを完了にする。作業中のタスクのほか、todo や後回しのタスクも完了にできる。作業中のタスクを完了にすると、作業中のタスクはなくなる。',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        taskId: { type: 'string', description: 'タスク ID（T-0001）' },
-        notes: { type: 'string', description: '完了についてのメモ（任意）' },
-      },
-      required: ['taskId'],
+      required: ['id'],
     },
   },
 ]
@@ -133,16 +125,13 @@ const refresh = async ($: $, repo: Repo, loaded?: Loaded): Promise<Summary | nul
     return null
   }
   const snapshot = loaded ?? (await repo.load())
-  const summary = summarize(snapshot, snapshot.errors.length)
+  const summary = summarize(snapshot.tasks, snapshot.errors.length)
   await update($, summaryAtom, () => summary as LightpmSummary)
-  await update($, boardAtom, () => boardRows(snapshot) as LightpmBoardRow[])
+  await update($, boardAtom, () => boardRows(snapshot.tasks) as LightpmBoardRow[])
   return summary
 }
 
-const errorNote = (loaded: Loaded): string =>
-  loaded.errors.length > 0 ? `\n\n注意: 読み込めなかったファイルがあります（/pm status で確認）:\n${loaded.errors.map(e => `- ${e}`).join('\n')}` : ''
-
-/** 状態を変える操作：読み込み → コア → 書き込み → 帯の更新、を排他で行う。 */
+/** 状態を変える操作：読み込み → コア → 書き込み → 帯と一覧の更新、を排他で行う。 */
 const mutate = <T,>($: $, work: (repo: Repo, loaded: Loaded, now: string) => Promise<T>): Promise<T> =>
   exclusive(async () => {
     const repo = await repoOf($)
@@ -153,6 +142,13 @@ const mutate = <T,>($: $, work: (repo: Repo, loaded: Loaded, now: string) => Pro
     return result
   })
 
+/** 読むだけの操作。.pm/ がなければ案内を返す。 */
+const inspect = async ($: $, work: (loaded: Loaded, repo: Repo) => Promise<string> | string): Promise<string> => {
+  const repo = await repoOf($)
+  if (!(await repo.exists())) return NOT_INITIALIZED
+  return work(await repo.load(), repo)
+}
+
 const answer = async (work: () => Promise<string>): Promise<{ result: string } | { deny: string }> => {
   try {
     return { result: await work() }
@@ -162,72 +158,55 @@ const answer = async (work: () => Promise<string>): Promise<{ result: string } |
   }
 }
 
+const FILTERS: readonly string[] = ['open', 'all', ...STATUSES]
+const toFilter = (value: unknown): ListFilter => (typeof value === 'string' && FILTERS.includes(value) ? (value as ListFilter) : 'open')
+
+const showTask = (loaded: Loaded, id: string | undefined): string => {
+  const task = loaded.tasks.find(t => t.id === id)
+  return task ? formatShow(task, loaded.tasks) : `タスク ${id || '(id なし)'} は見つかりません。`
+}
+
 // ---- /pm ----
 
 const HELP = [
-  '/pm [status]            フェーズ、作業中のタスク、一覧',
-  '/pm init [phase]        .pm/ を作る（既定 alpha）',
-  '/pm view                タスク一覧のペインを開く（優先順に並び、選んで展開できる）',
-  '/pm next                次に選ばれるタスクを表示（状態は変えない）',
-  '/pm list [status]       タスクの一覧（todo / in_progress / deferred / done / dropped）',
-  '/pm why <id>            そのタスクが選ばれた・後回しになった理由',
-  '/pm phase [set <phase> [理由]]  フェーズの表示・手動変更（監査ログに残る）',
-  '/pm policy              フェーズポリシーの表',
-  '/pm refresh             .pm/ を読み直して帯を更新',
+  '/pm                     未完了のタスク（作業中と未着手）を優先度順に表示',
+  '/pm view                タスク一覧のペインを開く（選ぶとやることを展開する）',
+  '/pm show <id>           タスクの内容とやること',
+  '/pm list [status|all]   状態を指定した一覧（todo / in_progress / done / dropped）',
+  '/pm why <id>            タスクの変更履歴（優先度や状態をいつ、なぜ変えたか）',
+  '/pm init                .pm/ を作る',
+  '/pm refresh             .pm/ を読み直して帯と一覧を更新',
 ].join('\n')
 
 const runCommand = async ($: $, args: string): Promise<string> => {
-  const [sub = 'status', ...rest] = args.trim().split(/\s+/).filter(s => s !== '')
+  const [sub = 'list', ...rest] = args.trim().split(/\s+/).filter(s => s !== '')
   const repo = await repoOf($)
   if (sub === 'help') return HELP
   if (sub === 'init') {
-    const phase = (rest[0] ?? 'alpha') as Phase
-    if (!(PHASES as readonly string[]).includes(phase)) return `フェーズは ${PHASES.join(' / ')} のいずれかです。`
-    const created = await exclusive(() => repo.init(phase))
+    const created = await exclusive(() => repo.init())
     await refresh($, repo)
-    return created ? `.pm/ を作りました（フェーズ ${phase}）。/lightpm:pm-plan で目的を分解して登録できます。` : '.pm/ は既にあります。'
+    return created ? '.pm/ を作りました。/lightpm:pm-plan で目的をタスクに分解して登録できます。' : '.pm/ は既にあります。'
   }
   if (!(await repo.exists())) return NOT_INITIALIZED
-  const now = await nowIso($)
   switch (sub) {
+    case 'list':
+    case 'status': {
+      const loaded = await repo.load()
+      await refresh($, repo, loaded)
+      return formatList(loaded.tasks, toFilter(rest[0]), loaded.errors)
+    }
     case 'view': {
       await refresh($, repo)
       const opened = await openBoard($)
       return opened.isPlaced ? 'タスク一覧を開きました（Esc で閉じる）。' : `タスク一覧を開けませんでした: ${opened.reason}`
     }
-    case 'status': {
-      const loaded = await repo.load()
-      await refresh($, repo, loaded)
-      return formatStatus(loaded, loaded.errors, nextTask(loaded, now, { dryRun: true }).result)
-    }
-    case 'next': {
-      const loaded = await repo.load()
-      return formatNext(nextTask(loaded, now, { dryRun: true }).result, true)
-    }
-    case 'list': {
-      const loaded = await repo.load()
-      return formatList(loaded.tasks, rest[0])
-    }
+    case 'show':
+      return showTask(await repo.load(), rest[0])
     case 'why': {
       const id = rest[0]
       if (!id) return '使い方: /pm why T-0012'
       const loaded = await repo.load()
       return formatWhy(id, loaded.tasks.find(t => t.id === id), await repo.readLog())
-    }
-    case 'phase': {
-      if (rest[0] !== 'set') {
-        const loaded = await repo.load()
-        return `現在のフェーズ: ${loaded.state.phase}（手動で変えるには /pm phase set <alpha|beta|rc|gm> [理由]）`
-      }
-      return mutate($, async (r, loaded, at) => {
-        const outcome = setPhase(loaded, { phase: rest[1], reason: rest.slice(2).join(' ') }, at)
-        await r.persist(outcome, at)
-        return `フェーズを ${outcome.result.from} → ${outcome.result.to} に変えました（監査ログ: phase.set）。`
-      }).catch(e => (e instanceof InputError ? e.message : String(e)))
-    }
-    case 'policy': {
-      const loaded = await repo.load()
-      return `着手できる下限（実効優先度）:\n${formatPolicy(loaded.config.policy)}`
     }
     case 'refresh': {
       const loaded = await repo.load()
@@ -244,7 +223,7 @@ const runCommand = async ($: $, args: string): Promise<string> => {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     for (const tool of TOOLS) await $.tool.register(tool)
-    await $.command.register({ name: 'pm', description: 'LightPM: フェーズとタスクの状態（/pm help）', argumentHint: '[status|view|init|next|list|why|phase|policy|refresh]' })
+    await $.command.register({ name: 'pm', description: 'LightPM: タスクの一覧と内容（/pm help）', argumentHint: '[view|show|list|why|init|refresh]' })
     try {
       await refresh($, await repoOf($))
     } catch (err) {
@@ -263,26 +242,12 @@ export const register: Register = on => {
 
   // ---- ツール ----
 
-  on('tool.call', { tool: 'mcp__lightpm__pm_status' }, async $ =>
-    answer(async () => {
-      const repo = await repoOf($)
-      if (!(await repo.exists())) return NOT_INITIALIZED
-      const loaded = await repo.load()
-      await refresh($, repo, loaded)
-      return formatStatus(loaded, loaded.errors, nextTask(loaded, await nowIso($), { dryRun: true }).result)
-    }),
+  on('tool.call', { tool: 'mcp__lightpm__pm_list' }, async ($, e) =>
+    answer(() => inspect($, loaded => formatList(loaded.tasks, toFilter(e.status), loaded.errors))),
   )
 
-  on('tool.call', { tool: 'mcp__lightpm__pm_next' }, async $ =>
-    answer(async () => {
-      const repo = await repoOf($)
-      if (!(await repo.exists())) return NOT_INITIALIZED
-      return mutate($, async (r, loaded, now) => {
-        const outcome = nextTask(loaded, now)
-        await r.persist(outcome, now)
-        return formatNext(outcome.result) + errorNote(loaded)
-      })
-    }),
+  on('tool.call', { tool: 'mcp__lightpm__pm_show' }, async ($, e) =>
+    answer(() => inspect($, loaded => showTask(loaded, typeof e.id === 'string' ? e.id.trim() : undefined))),
   )
 
   on('tool.call', { tool: 'mcp__lightpm__pm_add' }, async ($, e) =>
@@ -295,9 +260,7 @@ export const register: Register = on => {
         }
         const outcome = addTask(snapshot, e, now, actorOf(e))
         await r.persist(outcome, now)
-        const { task, notes } = outcome.result
-        const status = task.status === 'deferred' && task.defer ? `後回し（${task.defer.reason} → ${task.defer.until}）` : task.status
-        return [`登録: ${task.id} [${task.priority} ${task.kind}] ${task.title} — ${status}`, ...notes.map(n => `- ${n}`)].join('\n')
+        return formatSaved('登録', outcome.result.task, outcome.result.notes)
       }),
     ),
   )
@@ -309,25 +272,12 @@ export const register: Register = on => {
       return mutate($, async (r, loaded, now) => {
         const outcome = updateTask(loaded, e, now, actorOf(e))
         await r.persist(outcome, now)
-        const { task, notes } = outcome.result
-        return [`更新: ${task.id} [${task.priority} ${task.kind}] ${task.title} — ${task.status}`, ...notes.map(n => `- ${n}`)].join('\n')
+        return formatSaved('更新', outcome.result.task, outcome.result.notes)
       })
     }),
   )
 
-  on('tool.call', { tool: 'mcp__lightpm__pm_complete' }, async ($, e) =>
-    answer(async () => {
-      const repo = await repoOf($)
-      if (!(await repo.exists())) return NOT_INITIALIZED
-      return mutate($, async (r, loaded, now) => {
-        const outcome = completeTask(loaded, e, now, actorOf(e))
-        await r.persist(outcome, now)
-        return formatComplete(outcome.result)
-      })
-    }),
-  )
-
-  // ---- 文脈・帯・記録 ----
+  // ---- 文脈・帯 ----
 
   on('prompt.submit', async ($, e, next) => {
     const summary = (await $.state.get(SUMMARY)).value
@@ -361,7 +311,7 @@ export const register: Register = on => {
     )
   })
 
-  // ---- タスク一覧のペイン：優先順に並べ、選ぶと中身（やること）を展開する ----
+  // ---- タスク一覧のペイン：優先度順に並べ、選ぶと説明とやることを展開する ----
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
@@ -375,52 +325,52 @@ export const register: Register = on => {
     }
     const rows = await read($, boardAtom)
     const expanded = await read($, expandedAtom)
+    const showDone = await read($, showDoneAtom)
     const toggle = (id: string) => () =>
       void update($, expandedAtom, list => (list.includes(id) ? list.filter(x => x !== id) : [...list, id]))
 
-    const GROUPS = [
-      { group: 'active', heading: '作業中' },
-      { group: 'next', heading: '次にやる順' },
-      { group: 'blocked', heading: '前提の完了待ち' },
-      { group: 'later', heading: '後回し' },
-    ] as const
-
-    const row = (r: LightpmBoardRow, index: number) => {
+    const row = (r: LightpmBoardRow) => {
       const isOpen = expanded.includes(r.id)
-      const priority = r.eff === r.priority ? r.priority : `${r.priority}→${r.eff}`
-      const number = r.group === 'next' ? `${index + 1}. ` : ''
+      const progress = r.progress.total > 0 ? `  ${r.progress.done}/${r.progress.total}` : ''
+      const deps = r.dependsOn.length > 0 ? `  前提: ${r.dependsOn.map(d => `${d.id}（${d.status}）`).join(', ')}` : ''
       return (
         <Box key={`row:${r.id}`} flexDirection="column">
-          <Button key={`t:${r.id}`} plain label={`${isOpen ? '▾' : '▸'} ${number}${r.id} [${priority}] ${r.title}`} onPress={toggle(r.id)} />
+          <Button key={`t:${r.id}`} plain label={`${isOpen ? '▾' : '▸'} ${r.id} [${r.priority}] ${r.title}${progress}`} onPress={toggle(r.id)} />
           {isOpen && (
             <Box key={`d:${r.id}`} flexDirection="column" paddingLeft={4}>
-              <Text dimColor>やること（完了条件）</Text>
-              {r.acceptance.map((item, i) => (
-                <Text wrap="wrap">{`${i + 1}. ${item}`}</Text>
-              ))}
-              <Text dimColor wrap="wrap">{`種別 ${r.kind}${r.dependsOn.length > 0 ? ` · 前提 ${r.dependsOn.join(', ')}` : ''}${r.note ? ` · ${r.note}` : ''}`}</Text>
-              {r.paths.length > 0 && <Text dimColor wrap="wrap">{`主なファイル: ${r.paths.join(', ')}`}</Text>}
               {r.body !== '' && <Text wrap="wrap">{r.body}</Text>}
+              <Text dimColor>やること</Text>
+              {r.checklist.map((item, i) => (
+                <Text wrap="wrap" dimColor={item.done}>{`[${item.done ? 'x' : ' '}] ${i + 1}. ${item.text}`}</Text>
+              ))}
+              <Text dimColor wrap="wrap">{`種別 ${r.kind}${r.severity ? ` · 重大度 ${r.severity}` : ''}${r.impacts ? ` · 影響 ${r.impacts}` : ''}${deps}`}</Text>
             </Box>
           )}
         </Box>
       )
     }
 
+    const section = (key: string, heading: string, list: LightpmBoardRow[]) =>
+      list.length === 0 ? null : (
+        <Box key={`g:${key}`} flexDirection="column" marginTop={1}>
+          <Text dimColor>{`${heading}（${list.length}）`}</Text>
+          {list.map(row)}
+        </Box>
+      )
+
+    const done = rows.filter(r => r.group === 'done')
     return (
       <Box flexDirection="column">
-        <Text bold wrap="truncate-end">{`LightPM ${PHASE_LABEL[summary.phase]} · 完了 ${summary.counts.done}`}</Text>
-        {rows.length === 0 && <Text dimColor>未完了のタスクはありません。/lightpm:pm-plan で登録できます。</Text>}
-        {GROUPS.map(({ group, heading }) => {
-          const list = rows.filter(r => r.group === group)
-          if (list.length === 0) return null
-          return (
-            <Box key={`g:${group}`} flexDirection="column" marginTop={1}>
-              <Text dimColor>{`${heading}（${list.length}）`}</Text>
-              {list.map(row)}
-            </Box>
-          )
-        })}
+        <Text bold wrap="truncate-end">{`LightPM · 作業中 ${summary.counts.in_progress} · 未着手 ${summary.counts.todo} · 完了 ${summary.counts.done}`}</Text>
+        {summary.counts.in_progress + summary.counts.todo === 0 && <Text dimColor>未完了のタスクはありません。/lightpm:pm-plan で登録できます。</Text>}
+        {section('active', '作業中', rows.filter(r => r.group === 'active'))}
+        {section('todo', '未着手', rows.filter(r => r.group === 'todo'))}
+        {done.length > 0 && (
+          <Box key="done" flexDirection="column" marginTop={1}>
+            <Button key="toggle-done" plain label={`${showDone ? '▾' : '▸'} 完了（${done.length}）`} onPress={() => void update($, showDoneAtom, v => !v)} />
+            {showDone && done.map(row)}
+          </Box>
+        )}
       </Box>
     )
   })

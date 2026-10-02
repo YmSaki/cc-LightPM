@@ -1,8 +1,8 @@
 // .pm/ の読み書き。$.fs と同じ形の Fs を受け取り、.pm/ の外へは書かない。
 
 import { parseTask, serializeTask } from '../core/frontmatter.ts'
-import { PHASES, SCHEMA, defaultConfig, defaultState } from '../core/types.ts'
-import type { Config, LogEvent, Phase, Snapshot, State, Task } from '../core/types.ts'
+import { SCHEMA, defaultState } from '../core/types.ts'
+import type { LogEvent, Snapshot, State, Task } from '../core/types.ts'
 
 export type Fs = {
   read: (path: string) => Promise<string>
@@ -49,13 +49,9 @@ export class Repo {
     }
   }
 
-  async init(phase: Phase = 'alpha'): Promise<boolean> {
+  async init(): Promise<boolean> {
     if (await this.exists()) return false
-    // 手で置いた config.json は残す
-    if (!(await this.fs.exists(this.path('.pm/config.json')))) {
-      await this.write('.pm/config.json', `${JSON.stringify(defaultConfig(), null, 2)}\n`)
-    }
-    await this.write('.pm/state.json', `${JSON.stringify(defaultState(phase), null, 2)}\n`)
+    await this.saveState(defaultState())
     return true
   }
 
@@ -72,18 +68,8 @@ export class Repo {
       errors.push(`.pm/state.json: ${String(e)}`)
       return undefined
     })
-    const rawConfig = await this.readJson('.pm/config.json').catch(e => {
-      errors.push(`.pm/config.json: ${String(e)}`)
-      return undefined
-    })
     const state = defaultState()
-    if (rawState) {
-      if (typeof rawState.phase === 'string' && (PHASES as readonly string[]).includes(rawState.phase)) state.phase = rawState.phase as Phase
-      if (typeof rawState.nextId === 'number' && rawState.nextId > 0) state.nextId = Math.floor(rawState.nextId)
-      if (typeof rawState.active === 'string') state.active = rawState.active
-    }
-    const config = defaultConfig()
-    if (rawConfig?.policy && typeof rawConfig.policy === 'object') config.policy = rawConfig.policy as Config['policy']
+    if (rawState && typeof rawState.nextId === 'number' && rawState.nextId > 0) state.nextId = Math.floor(rawState.nextId)
 
     const tasks: Task[] = []
     const dir = this.path('.pm/tasks')
@@ -109,7 +95,7 @@ export class Repo {
       const n = Number(t.id.slice(2))
       if (n >= state.nextId) state.nextId = n + 1
     }
-    return { state, config, tasks, errors }
+    return { state, tasks, errors }
   }
 
   async saveTask(task: Task): Promise<void> {
@@ -117,7 +103,7 @@ export class Repo {
   }
 
   async saveState(state: State): Promise<void> {
-    const out = { schema: SCHEMA, phase: state.phase, nextId: state.nextId, active: state.active }
+    const out = { schema: SCHEMA, nextId: state.nextId }
     await this.write('.pm/state.json', `${JSON.stringify(out, null, 2)}\n`)
   }
 

@@ -46,6 +46,8 @@ const text = (r: unknown): string => {
 }
 
 const add = (fields: Record<string, unknown>) => ({ tool: 'mcp__lightpm__pm_add', ...fields }) as never
+const upd = (fields: Record<string, unknown>) => ({ tool: 'mcp__lightpm__pm_update', ...fields }) as never
+const call = (tool: string, fields: Record<string, unknown> = {}) => ({ tool: `mcp__lightpm__${tool}`, ...fields }) as never
 
 const COMPOSER = { kind: 'composer' } as const
 const pm = (args: string) => ({ command: 'pm', args, origin: COMPOSER, presentation: { isFullscreen: false, columns: 120 } })
@@ -55,43 +57,43 @@ const MAX_FEATURE = {
   title: 'CSV エクスポートを実装する',
   kind: 'feature',
   priority: 'max',
-  scope_paths: ['src/export/**', 'tests/export/**'],
-  acceptance: ['一覧画面から CSV をダウンロードできる'],
+  body: '一覧画面に CSV で保存するボタンを付ける',
+  checklist: ['ボタンを付ける', 'CSV を組み立てる', '空の一覧でも出力できる'],
 }
 
 describe('ツール', () => {
-  test('pm_add → pm_next → pm_complete の一連の流れ', async ($, on) => {
+  test('登録 → 一覧 → 内容 → 進捗の更新 → 完了', async ($, on) => {
     const w = world(on)
-    expect(text(await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never))).toContain('まだ使われていません')
+    expect(text(await $.tool.call(call('pm_list')))).toContain('まだ使われていません')
 
-    const added = text(await $.tool.call(add(MAX_FEATURE)))
-    expect(added).toContain('登録: T-0001 [max feature]')
+    expect(text(await $.tool.call(add(MAX_FEATURE)))).toBe('登録: T-0001 [max feature] CSV エクスポートを実装する — 未着手 0/3')
     expect(w.files.has(`${ROOT}/.pm/state.json`)).toBe(true)
-    expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('priority: max')
+    expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('- "[ ] ボタンを付ける"')
 
-    const bug = text(await $.tool.call(add({ title: '空の一覧で例外', kind: 'bug', severity: 'S2', impacts: 'T-0001', scope_paths: ['src/export/csv.ts'], acceptance: ['例外が出ない'] })))
+    const bug = text(await $.tool.call(add({ title: '空の一覧で例外', kind: 'bug', severity: 'S2', impacts: 'T-0001', checklist: ['例外が出ない'] })))
     expect(bug).toContain('T-0002 [xhigh bug]')
 
-    const next = text(await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never))
-    expect(next).toContain('選択: T-0001')
-    expect(next).toContain('タスクの内容（フェーズ Alpha）')
-    expect(next).toContain('id: T-0001')
-    const state = JSON.parse(w.files.get(`${ROOT}/.pm/state.json`) ?? '{}')
-    expect(state.active).toBe('T-0001')
+    expect(text(await $.tool.call(call('pm_list')))).toBe(
+      ['未着手（2）', '- T-0001 [max feature] CSV エクスポートを実装する  0/3', '- T-0002 [xhigh bug] 空の一覧で例外  0/1'].join('\n'),
+    )
+    expect(text(await $.tool.call(call('pm_show', { id: 'T-0001' })))).toContain('[ ] 2. CSV を組み立てる')
 
-    const done = text(await $.tool.call({ tool: 'mcp__lightpm__pm_complete', taskId: 'T-0001' } as never))
-    expect(done).toContain('T-0001 を完了にした')
+    expect(text(await $.tool.call(upd({ id: 'T-0001', check: [1] })))).toBe('更新: T-0001 [max feature] CSV エクスポートを実装する — 作業中 1/3')
+    expect(text(await $.tool.call(upd({ id: 'T-0001', check: [2, 3] })))).toBe('更新: T-0001 [max feature] CSV エクスポートを実装する — 完了 3/3')
     expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('status: done')
 
     const log = w.files.get(`${ROOT}/.pm/log/2026-10.jsonl`) ?? ''
     const events = log.trim().split('\n').map(l => JSON.parse(l).event)
-    expect(events).toEqual(['task.created', 'task.created', 'task.selected', 'task.completed'])
+    expect(events).toEqual(['task.created', 'task.created', 'task.progress', 'task.status', 'task.progress', 'task.status'])
   })
 
   test('入力の誤りはエラーとしてモデルに返す', async ($, on) => {
     world(on)
     const out = (await $.tool.call(add({ ...MAX_FEATURE, priority: 'urgent' }))) as { deny?: string }
     expect(out.deny).toContain('priority は xlow / low / mid / high / xhigh / max のいずれかです')
+    await $.tool.call(add(MAX_FEATURE))
+    const noReason = (await $.tool.call(upd({ id: 'T-0001', priority: 'low' }))) as { deny?: string }
+    expect(noReason.deny).toContain('reason')
   })
 
   test('並行した pm_add でも id が重複しない', async ($, on) => {
@@ -102,29 +104,29 @@ describe('ツール', () => {
     expect(JSON.parse(w.files.get(`${ROOT}/.pm/state.json`) ?? '{}').nextId).toBe(5)
   })
 
-  test('AC-10: .pm/ の外へは書き込まない', async ($, on) => {
+  test('.pm/ の外へは書き込まない', async ($, on) => {
     const w = world(on)
     await $.tool.call(add(MAX_FEATURE))
-    await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never)
-    await $.tool.call({ tool: 'mcp__lightpm__pm_update', id: 'T-0001', priority: 'xhigh', reason: 'テスト' } as never)
-    await $.tool.call({ tool: 'mcp__lightpm__pm_complete', taskId: 'T-0001', notes: 'x' } as never)
-    await $.tool.call({ tool: 'mcp__lightpm__pm_status' } as never)
-    await $.command.run(pm('phase set beta テスト'))
+    await $.tool.call(upd({ id: 'T-0001', check: [1], priority: 'xhigh', reason: 'テスト' }))
+    await $.tool.call(call('pm_list', { status: 'all' }))
+    await $.tool.call(call('pm_show', { id: 'T-0001' }))
+    await $.command.run(pm(''))
     expect(w.writes.length > 0).toBe(true)
     expect(w.writes.filter(p => !p.startsWith(`${ROOT}/.pm/`))).toEqual([])
   })
 })
 
 describe('/pm', () => {
-  test('init と status', async ($, on) => {
+  test('init、一覧、内容、変更履歴', async ($, on) => {
     world(on)
     expect((await $.command.run(pm('init'))).text).toContain('.pm/ を作りました')
-    await $.tool.call(add(MAX_FEATURE))
-    const status = (await $.command.run(pm(''))).text ?? ''
-    expect(status).toContain('フェーズ Alpha')
-    expect(status).toContain('次の候補: T-0001')
+    await $.tool.call(add({ ...MAX_FEATURE, reason: '基本シナリオの最後の段階' }))
+    await $.tool.call(upd({ id: 'T-0001', priority: 'xhigh', reason: '先に保存を作る' }))
+    expect((await $.command.run(pm(''))).text).toContain('- T-0001 [xhigh feature] CSV エクスポートを実装する  0/3')
+    expect((await $.command.run(pm('show T-0001'))).text).toContain('一覧画面に CSV で保存するボタンを付ける')
     const why = (await $.command.run(pm('why T-0001'))).text ?? ''
-    expect(why).toContain('登録: feature / max')
+    expect(why).toContain('登録: feature / max — 基本シナリオの最後の段階')
+    expect(why).toContain('分類の変更: priority max → xhigh — 先に保存を作る')
   })
 })
 
@@ -149,11 +151,11 @@ describe('セッション・プロンプト・帯', () => {
     })
     on('session.start', ($, e) => ({ cwd: e.cwd }))
     await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
-    expect(tools).toEqual(['pm_status', 'pm_next', 'pm_add', 'pm_update', 'pm_complete'])
+    expect(tools).toEqual(['pm_list', 'pm_show', 'pm_add', 'pm_update'])
     expect(commands).toEqual(['pm'])
   })
 
-  test('プロンプトにフェーズと作業中のタスクの要約を足す（600 文字以内）', async ($, on) => {
+  test('プロンプトに作業中のタスクと進捗を足す（600 文字以内）', async ($, on) => {
     world(on)
     let context: readonly string[] = []
     on('prompt.submit', ($, e) => {
@@ -164,21 +166,23 @@ describe('セッション・プロンプト・帯', () => {
     expect(context).toEqual([])
 
     await $.tool.call(add(MAX_FEATURE))
-    await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never)
     await $.prompt.submit(prompt('hello'))
-    expect(context.length).toBe(1)
-    expect(context[0]).toContain('今やること: T-0001「CSV エクスポートを実装する」')
+    expect(context[0]).toContain('最優先の未着手は T-0001「CSV エクスポートを実装する」（max）')
+
+    await $.tool.call(upd({ id: 'T-0001', check: [1] }))
+    await $.prompt.submit(prompt('hello'))
+    expect(context[0]).toContain('作業中: T-0001「CSV エクスポートを実装する」（max、1/3）')
     expect((context[0] ?? '').length <= 600).toBe(true)
   })
 
-  test('帯にフェーズと作業中のタスクと残数を1行で出す', async ($, on) => {
+  test('帯に作業中のタスクと進捗、残数を1行で出す', async ($, on) => {
     world(on)
     await $.tool.call(add(MAX_FEATURE))
-    await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never)
+    await $.tool.call(upd({ id: 'T-0001', check: [1] }))
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...BAND, surface })
       const line = await ui.find({ type: 'Text', text: /LightPM/ })
-      expect(line?.text).toBe('LightPM Alpha · ▶ T-0001 CSV エクスポートを実装する [max] · todo 0 · 後回し 0 · 完了 0')
+      expect(line?.text).toBe('LightPM · ▶ T-0001 CSV エクスポートを実装する [max] 1/3 · 作業中 1 · 未着手 0 · 完了 0')
       await ui.unmount()
     }
   })
@@ -192,24 +196,31 @@ describe('タスク一覧のペイン', () => {
     props: { title: 'LightPM タスク', isFocused: true, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
   } as const
 
-  test('優先順に並び、選ぶと「やること」を展開・折りたたみできる', async ($, on) => {
+  test('優先度順に並び、選ぶと説明とやることを展開する。完了は畳んでおける', async ($, on) => {
     world(on)
-    await $.tool.call(add({ ...MAX_FEATURE, acceptance: ['CSV をダウンロードできる', '空の一覧でも出力できる'] }))
-    await $.tool.call(add({ title: '設定画面', kind: 'feature', priority: 'high', acceptance: ['保存できる'] }))
-    await $.tool.call(add({ title: 'ボタンの色', kind: 'polish', priority: 'low', acceptance: ['色が揃う'] }))
+    await $.tool.call(add({ title: 'ボタンの色', kind: 'polish', priority: 'low', checklist: ['色が揃う'] }))
+    await $.tool.call(add(MAX_FEATURE))
+    await $.tool.call(add({ title: '設定画面', kind: 'feature', priority: 'high', checklist: ['保存できる'], depends_on: ['T-0002'] }))
+    await $.tool.call(upd({ id: 'T-0002', check: [1] }))
+    await $.tool.call(upd({ id: 'T-0001', check: [1] }))
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ ...PANE, surface })
       const labels = (await ui.findAll({ type: 'Button' })).map(b => b.text)
-      expect(labels).toEqual(['▸ 1. T-0001 [max] CSV エクスポートを実装する', '▸ 2. T-0002 [high] 設定画面', '▸ T-0003 [low] ボタンの色'])
-      expect((await ui.find({ type: 'Text', text: '後回し（1）' }))?.text).toBe('後回し（1）')
-      expect(await ui.find({ type: 'Text', text: '2. 空の一覧でも出力できる' })).toBeUndefined()
+      expect(labels).toEqual(['▸ T-0002 [max] CSV エクスポートを実装する  1/3', '▸ T-0003 [high] 設定画面  0/1', '▸ 完了（1）'])
+      expect(await ui.find({ type: 'Text', text: '[x] 1. ボタンを付ける' })).toBeUndefined()
 
-      await ui.press({ key: 't:T-0001' })
-      expect((await ui.find({ key: 't:T-0001' }))?.text).toBe('▾ 1. T-0001 [max] CSV エクスポートを実装する')
-      expect((await ui.find({ type: 'Text', text: '2. 空の一覧でも出力できる' }))?.text).toBe('2. 空の一覧でも出力できる')
+      await ui.press({ key: 't:T-0002' })
+      expect((await ui.find({ type: 'Text', text: '[x] 1. ボタンを付ける' }))?.text).toBe('[x] 1. ボタンを付ける')
+      expect((await ui.find({ type: 'Text', text: '一覧画面に CSV で保存する' }))?.text).toBe('一覧画面に CSV で保存するボタンを付ける')
+      await ui.press({ key: 't:T-0002' })
 
-      await ui.press({ key: 't:T-0001' })
-      expect(await ui.find({ type: 'Text', text: '2. 空の一覧でも出力できる' })).toBeUndefined()
+      await ui.press({ key: 't:T-0003' })
+      expect((await ui.find({ type: 'Text', text: /前提: T-0002（作業中）/ }))?.text).toBe('種別 feature  前提: T-0002（作業中）')
+      await ui.press({ key: 't:T-0003' })
+
+      await ui.press({ key: 'toggle-done' })
+      expect((await ui.find({ key: 't:T-0001' }))?.text).toBe('▸ T-0001 [low] ボタンの色  1/1')
+      await ui.press({ key: 'toggle-done' })
       await ui.unmount()
     }
   })

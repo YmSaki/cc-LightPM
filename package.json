@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Claude Code plugin + mod: decide the next task by release phase and priority",
+  "description": "Claude Code plugin + mod: manage project tasks by priority and show them to the user",
   "scripts": {
     "test": "npm run test:core && npm run test:mod",
     "test:core": "node --test \"tests/core/*.spec.ts\"",

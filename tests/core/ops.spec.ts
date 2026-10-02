@@ -1,54 +1,14 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
+import { boardRows, contextFor, formatList, formatShow, summarize } from '../../src/core/format.ts'
 import { parseTask, serializeTask } from '../../src/core/frontmatter.ts'
-import { InputError, addTask, completeTask, setPhase, updateTask } from '../../src/core/ops.ts'
-import { DEFAULT_POLICY, admits, bugPriority, deferUntil, resolvePolicy } from '../../src/core/policy.ts'
-import { KINDS, PHASES, PRIORITIES, ordinal } from '../../src/core/types.ts'
-import type { Kind, Phase, Priority } from '../../src/core/types.ts'
+import { InputError, addTask, updateTask } from '../../src/core/ops.ts'
+import { bugPriority, sortTasks } from '../../src/core/priority.ts'
+import type { Priority, Task } from '../../src/core/types.ts'
 import { NOW, snapshot, task } from './fixtures.ts'
 
-describe('フェーズポリシー（表駆動）', () => {
-  // 仕様書の表：着手できる最低の優先度。null は不可
-  const FLOOR: Record<Phase, Record<Kind, Priority | null>> = {
-    alpha: { feature: 'high', bug: 'xhigh', chore: 'mid', refactor: 'xhigh', polish: 'xhigh', release: null },
-    beta: { feature: 'xhigh', bug: 'mid', chore: 'mid', refactor: 'high', polish: 'high', release: null },
-    rc: { feature: null, bug: 'high', chore: 'high', refactor: null, polish: null, release: null },
-    gm: { feature: null, bug: null, chore: null, refactor: null, polish: null, release: 'xlow' },
-  }
-  for (const phase of PHASES) {
-    for (const kind of KINDS) {
-      for (const priority of PRIORITIES) {
-        const floor = FLOOR[phase][kind]
-        const expected = floor !== null && ordinal(priority) >= ordinal(floor)
-        test(`${phase} ${kind} ${priority} → ${expected ? '可' : '不可'}`, () => {
-          const result = admits(DEFAULT_POLICY, phase, task({ id: 'T-0001', kind, priority }), ordinal(priority))
-          assert.equal(result.ok, expected)
-          if (!result.ok) assert.equal(result.reason, floor === null && !(kind === 'bug' && phase === 'gm') ? 'P-KIND' : 'P-FLOOR')
-        })
-      }
-    }
-  }
-
-  test('リリース阻害のバグは RC と GM で優先度に関わらず着手できる', () => {
-    const t = task({ id: 'T-0001', kind: 'bug', priority: 'xlow', release_blocker: true })
-    assert.equal(admits(DEFAULT_POLICY, 'rc', t, 0).ok, true)
-    assert.equal(admits(DEFAULT_POLICY, 'gm', t, 0).ok, true)
-  })
-
-  test('defer.until は着手できる最初のフェーズ、どこでも無理なら post', () => {
-    assert.equal(deferUntil(DEFAULT_POLICY, 'alpha', task({ id: 'T-0001', kind: 'bug', priority: 'mid' }), ordinal('mid')), 'beta')
-    assert.equal(deferUntil(DEFAULT_POLICY, 'alpha', task({ id: 'T-0001', kind: 'polish', priority: 'low' }), ordinal('low')), 'post')
-    assert.equal(deferUntil(DEFAULT_POLICY, 'alpha', task({ id: 'T-0001', kind: 'release', priority: 'low' }), ordinal('low')), 'gm')
-  })
-
-  test('config.json の policy で上書きできる', () => {
-    const policy = resolvePolicy({ alpha: { bug: 'mid', polish: null } })
-    assert.deepEqual(policy.alpha.bug, { min: 'mid' })
-    assert.deepEqual(policy.alpha.polish, { min: null })
-    assert.deepEqual(policy.beta, DEFAULT_POLICY.beta)
-  })
-})
+const items = (...texts: string[]) => texts.map(text => ({ text, done: false }))
 
 describe('バグの優先度の表', () => {
   const TABLE: [Priority, string, string, string, string][] = [
@@ -68,166 +28,174 @@ describe('バグの優先度の表', () => {
     })
   }
 
-  test('pm_add は影響先のタスクから表で優先度を決め、Alpha では後回しにする（付録の例）', () => {
+  test('pm_add は影響先のタスクから表で優先度を決める', () => {
     const snap = snapshot([task({ id: 'T-0009', kind: 'feature', priority: 'high' })])
-    const out = addTask(
-      snap,
-      { title: '空の一覧で CSV を出力すると例外になる', kind: 'bug', severity: 'S2', impacts: 'T-0009', scope_paths: ['src/export/csv.ts'], acceptance: ['例外が出ない'] },
-      NOW,
-    )
+    const out = addTask(snap, { title: '空の一覧で例外', kind: 'bug', severity: 'S2', impacts: 'T-0009', checklist: ['例外が出ない'] }, NOW)
     assert.equal(out.result.task.priority, 'mid')
-    assert.equal(out.result.task.status, 'deferred')
-    assert.deepEqual(out.result.task.defer, { until: 'beta', reason: 'P-FLOOR' })
+    assert.equal(out.result.task.status, 'todo')
     assert.equal(out.result.task.id, 'T-0002')
     assert.equal(out.state.nextId, 3)
   })
 
-  test('RC で max / xhigh のバグには release_blocker が付く', () => {
-    const snap = snapshot([task({ id: 'T-0001', kind: 'feature', priority: 'max', status: 'done' })], 'rc')
-    const out = addTask(snap, { title: 'クラッシュ', kind: 'bug', severity: 'S0', impacts: 'T-0001', scope_paths: ['src/a.ts'], acceptance: ['落ちない'] }, NOW)
+  test('影響先がタスクでなければ impact_priority を使う', () => {
+    const out = addTask(snapshot([]), { title: 'ログインで落ちる', kind: 'bug', severity: 'S0', impacts: 'ログイン', impact_priority: 'max', checklist: ['落ちない'] }, NOW)
     assert.equal(out.result.task.priority, 'max')
-    assert.equal(out.result.task.release_blocker, true)
-    assert.equal(out.result.task.status, 'todo')
   })
 })
 
-describe('pm_add / pm_update の検証', () => {
-  const base = { title: 'x', kind: 'feature', priority: 'max', scope_paths: ['src/x/**'], acceptance: ['ok'] }
+describe('pm_add', () => {
+  const base = { title: 'x', kind: 'feature', priority: 'max', checklist: ['ok'] }
 
-  test('必須項目を確かめる（scope_paths は任意）', () => {
-    assert.doesNotThrow(() => addTask(snapshot([]), { ...base, scope_paths: undefined }, NOW))
-    assert.throws(() => addTask(snapshot([]), { ...base, acceptance: [] }, NOW), InputError)
+  test('登録した内容と変更履歴', () => {
+    const out = addTask(snapshot([]), { ...base, body: '説明', checklist: ['a', 'b'], reason: '基本機能' }, NOW)
+    assert.deepEqual(out.result.task.checklist, items('a', 'b'))
+    assert.equal(out.result.task.body, '説明')
+    assert.deepEqual(out.events, [{ event: 'task.created', actor: 'main', taskId: 'T-0001', kind: 'feature', priority: 'max', reason: '基本機能' }])
+  })
+
+  test('必須項目を確かめる', () => {
+    assert.throws(() => addTask(snapshot([]), { ...base, checklist: [] }, NOW), InputError)
     assert.throws(() => addTask(snapshot([]), { ...base, title: '' }, NOW), InputError)
     assert.throws(() => addTask(snapshot([]), { ...base, priority: 'urgent' }, NOW), InputError)
     assert.throws(() => addTask(snapshot([]), { ...base, depends_on: ['T-0099'] }, NOW), InputError)
+    assert.throws(() => addTask(snapshot([]), { ...base, kind: 'bug' }, NOW), /severity/)
+  })
+})
+
+describe('pm_update', () => {
+  const three = (): ReturnType<typeof snapshot> => snapshot([task({ id: 'T-0001', checklist: items('a', 'b', 'c') })])
+
+  test('項目を済みにすると作業中になり、全部済むと完了になる', () => {
+    const first = updateTask(three(), { id: 'T-0001', check: [1] }, NOW)
+    assert.equal(first.result.task.status, 'in_progress')
+    assert.deepEqual(first.result.task.checklist.map(i => i.done), [true, false, false])
+    assert.deepEqual(
+      first.events.map(e => e.event),
+      ['task.progress', 'task.status'],
+    )
+
+    const all = updateTask(three(), { id: 'T-0001', check: [1, 2, 3] }, NOW)
+    assert.equal(all.result.task.status, 'done')
   })
 
-  test('依存の循環は拒否する', () => {
-    const snap = snapshot([task({ id: 'T-0001', depends_on: ['T-0002'] }), task({ id: 'T-0002' })])
-    assert.throws(() => updateTask(snap, { id: 'T-0002', depends_on: ['T-0001'], reason: 'r' }, NOW), /循環/)
+  test('済みを戻すと完了から作業中に戻る。status を指定すればそれを使う', () => {
+    const done = snapshot([task({ id: 'T-0001', status: 'done', checklist: [{ text: 'a', done: true }, { text: 'b', done: true }] })])
+    assert.equal(updateTask(done, { id: 'T-0001', uncheck: [2] }, NOW).result.task.status, 'in_progress')
+    assert.equal(updateTask(three(), { id: 'T-0001', check: [1, 2, 3], status: 'in_progress' }, NOW).result.task.status, 'in_progress')
+    assert.equal(updateTask(three(), { id: 'T-0001', status: 'dropped' }, NOW).result.task.status, 'dropped')
   })
 
-  test('再分類は旧値と新値と理由を監査ログに残す', () => {
+  test('存在しない項目番号は拒否する', () => {
+    assert.throws(() => updateTask(three(), { id: 'T-0001', check: [4] }, NOW), /4 番目/)
+  })
+
+  test('チェックリストを置き換えても、同じ文面の項目は済みの印を引き継ぐ', () => {
+    const snap = snapshot([task({ id: 'T-0001', checklist: [{ text: 'a', done: true }, { text: 'b', done: false }] })])
+    const out = updateTask(snap, { id: 'T-0001', checklist: ['a', 'c'] }, NOW)
+    assert.deepEqual(out.result.task.checklist, [{ text: 'a', done: true }, { text: 'c', done: false }])
+  })
+
+  test('種別や優先度の変更は理由が必須で、旧値と新値と理由を残す', () => {
     const snap = snapshot([task({ id: 'T-0001', priority: 'mid' })])
+    assert.throws(() => updateTask(snap, { id: 'T-0001', priority: 'max' }, NOW), /reason/)
     const out = updateTask(snap, { id: 'T-0001', priority: 'max', reason: '基本シナリオに必要だった' }, NOW)
     const event = out.events.find(e => e.event === 'task.reclassified')
     assert.deepEqual(event?.changes, { priority: { from: 'mid', to: 'max' } })
     assert.equal(event?.reason, '基本シナリオに必要だった')
-    assert.throws(() => updateTask(snap, { id: 'T-0001', priority: 'max' }, NOW), /reason/)
   })
 
-  test('RC で xhigh 以上に再分類したバグには release_blocker が付く', () => {
-    const snap = snapshot([task({ id: 'T-0001', kind: 'bug', priority: 'mid', severity: 'S2', impacts: 'login' })], 'rc')
-    const out = updateTask(snap, { id: 'T-0001', priority: 'xhigh', reason: 'データが消えると分かった' }, NOW)
-    assert.equal(out.result.task.release_blocker, true)
-  })
-
-  test('作業中のタスクを取り下げると active が外れる', () => {
-    const snap = snapshot([task({ id: 'T-0001', status: 'in_progress' })])
-    snap.state.active = 'T-0001'
-    const out = updateTask(snap, { id: 'T-0001', status: 'dropped', reason: '不要になった' }, NOW)
-    assert.equal(out.result.task.status, 'dropped')
-    assert.equal(out.state.active, null)
-  })
-
-  test('フェーズの手動変更は phase.set を記録する', () => {
-    const out = setPhase(snapshot([]), { phase: 'beta', reason: 'デモのため' }, NOW)
-    assert.equal(out.state.phase, 'beta')
-    assert.deepEqual(out.events[0], { event: 'phase.set', actor: 'user', from: 'alpha', to: 'beta', reason: 'デモのため' })
+  test('依存の循環は拒否する', () => {
+    const snap = snapshot([task({ id: 'T-0001', depends_on: ['T-0002'] }), task({ id: 'T-0002' })])
+    assert.throws(() => updateTask(snap, { id: 'T-0002', depends_on: ['T-0001'] }, NOW), /循環/)
   })
 })
 
-describe('pm_complete', () => {
-  test('作業中のタスクを完了にすると active が外れる', () => {
-    const snap = snapshot([task({ id: 'T-0001', status: 'in_progress' })])
-    snap.state.active = 'T-0001'
-    const out = completeTask(snap, { taskId: 'T-0001', notes: '手元で確認済み' }, NOW)
-    assert.equal(out.result.task.status, 'done')
-    assert.equal(out.result.task.notes, '手元で確認済み')
-    assert.equal(out.state.active, null)
-    assert.deepEqual(out.events, [{ event: 'task.completed', actor: 'main', taskId: 'T-0001', from: 'in_progress', notes: '手元で確認済み' }])
+describe('一覧', () => {
+  test('優先度の高い順 → 作成日時 → id。読み込み順に関係なく同じ順になる', () => {
+    const base = [
+      task({ id: 'T-0001', priority: 'low' }),
+      task({ id: 'T-0002', priority: 'max', created: '2026-10-01T00:00:00.000Z' }),
+      task({ id: 'T-0003', priority: 'max', created: '2026-10-01T00:00:00.000Z' }),
+      task({ id: 'T-0004', priority: 'max', created: '2026-09-30T00:00:00.000Z' }),
+      task({ id: 'T-0005', priority: 'xhigh' }),
+    ]
+    const expected = ['T-0004', 'T-0002', 'T-0003', 'T-0005', 'T-0001']
+    assert.deepEqual(sortTasks(base).map(t => t.id), expected)
+    assert.deepEqual(sortTasks([...base].reverse()).map(t => t.id), expected)
   })
 
-  test('todo や後回しのタスクも直接完了にできる', () => {
-    const snap = snapshot([
-      task({ id: 'T-0001', status: 'todo' }),
-      task({ id: 'T-0002', kind: 'polish', priority: 'low', status: 'deferred', defer: { until: 'post', reason: 'P-FLOOR' } }),
-    ])
-    assert.equal(completeTask(snap, { taskId: 'T-0001' }, NOW).result.task.status, 'done')
-    const deferred = completeTask(snap, { taskId: 'T-0002' }, NOW).result.task
-    assert.equal(deferred.status, 'done')
-    assert.equal(deferred.defer, undefined)
+  test('状態ごとにまとめ、進捗と前提を明示する', () => {
+    const tasks = [
+      task({ id: 'T-0001', priority: 'max', status: 'done' }),
+      task({ id: 'T-0002', title: '保存', priority: 'max', depends_on: ['T-0001'], checklist: [{ text: 'a', done: true }, { text: 'b', done: false }], status: 'in_progress' }),
+      task({ id: 'T-0003', title: '一覧', priority: 'high', depends_on: ['T-0002'] }),
+      task({ id: 'T-0004', priority: 'low', status: 'dropped' }),
+    ]
+    assert.equal(
+      formatList(tasks),
+      [
+        '作業中（1）',
+        '- T-0002 [max feature] 保存  1/2  前提: T-0001（完了）',
+        '',
+        '未着手（1）',
+        '- T-0003 [high feature] 一覧  0/1  前提: T-0002（作業中）',
+        '',
+        '完了 1 件（/pm list done で表示）',
+      ].join('\n'),
+    )
+    assert.deepEqual(
+      boardRows(tasks).map(r => [r.id, r.group]),
+      [
+        ['T-0002', 'active'],
+        ['T-0003', 'todo'],
+        ['T-0001', 'done'],
+      ],
+    )
   })
 
-  test('完了済みや取り下げ済みのタスクは完了にできない', () => {
-    const snap = snapshot([task({ id: 'T-0001', status: 'done' }), task({ id: 'T-0002', status: 'dropped' })])
-    assert.throws(() => completeTask(snap, { taskId: 'T-0001' }, NOW), /既に done/)
-    assert.throws(() => completeTask(snap, { taskId: 'T-0002' }, NOW), /既に dropped/)
-    assert.throws(() => completeTask(snap, { taskId: 'T-0099' }, NOW), /存在しません/)
+  test('タスクの内容にチェックリストを出す', () => {
+    const t = task({ id: 'T-0002', title: '保存', body: 'JSON に保存する', checklist: [{ text: 'a', done: true }, { text: 'b', done: false }], status: 'in_progress' })
+    assert.equal(formatShow(t, [t]), ['T-0002 [mid feature] 保存（作業中、1/2）', '', 'JSON に保存する', '', 'やること:', '[x] 1. a', '[ ] 2. b'].join('\n'))
+  })
+
+  test('プロンプトに足す文脈は600文字以内', () => {
+    const long = task({ id: 'T-0001', title: 'あ'.repeat(800), status: 'in_progress' })
+    const text = contextFor(summarize([long], 0))
+    assert.ok(text.length <= 600)
+    assert.ok(text.endsWith('…'))
+    assert.match(contextFor(summarize([task({ id: 'T-0002', priority: 'max' })], 0)), /最優先の未着手は T-0002/)
   })
 })
 
 describe('タスクファイル', () => {
   test('書き出して読み直すと同じになる', () => {
-    const t = task({
+    const t: Task = task({
       id: 'T-0012',
       title: 'CSV エクスポートを実装する: 本体',
       kind: 'bug',
       priority: 'max',
-      status: 'deferred',
+      status: 'in_progress',
       depends_on: ['T-0003'],
-      scope: { paths: ['src/export/**', 'tests/export/**'] },
-      acceptance: ['一覧画面から CSV をダウンロードできる', '"引用" や # を含む'],
-      non_goals: ['Excel 形式への対応'],
-      estimate: 'M',
+      checklist: [{ text: '一覧画面から CSV をダウンロードできる', done: true }, { text: '"引用" や # を含む', done: false }],
       severity: 'S1',
       impacts: 'T-0003',
-      release_blocker: true,
-      defer: { until: 'beta', reason: 'P-FLOOR' },
       notes: 'true',
       body: '主要シナリオの最後のステップ。\n\n- 手順',
     })
-    assert.deepEqual(parseTask(serializeTask(t)), t)
+    const text = serializeTask(t)
+    assert.match(text, /- "\[x\] 一覧画面から CSV をダウンロードできる"/)
+    assert.deepEqual(parseTask(text), t)
   })
 
-  test('scope.paths のないタスクも書き出して読み直せる', () => {
-    const t = task({ id: 'T-0002', scope: { paths: [] } })
-    assert.doesNotMatch(serializeTask(t), /scope:/)
-    assert.deepEqual(parseTask(serializeTask(t)), t)
+  test('引用符のない "- [x] 項目" も読める', () => {
+    const t = parseTask(['---', 'id: T-0001', 'title: x', 'kind: feature', 'priority: max', 'status: todo', 'checklist:', '  - [x] できた', '  - [ ] まだ', '---', ''].join('\n'))
+    assert.deepEqual(t.checklist, [{ text: 'できた', done: true }, { text: 'まだ', done: false }])
   })
 
-  test('仕様書の付録の例を読める', () => {
-    const text = [
-      '---',
-      'schema: 1',
-      'id: T-0012',
-      'title: CSV エクスポートを実装する',
-      'kind: feature',
-      'priority: max',
-      'status: todo',
-      'depends_on: [T-0003]',
-      'scope:',
-      '  paths: ["src/export/**", "tests/export/**"]',
-      'acceptance:',
-      '  - 一覧画面から CSV をダウンロードできる',
-      '  - 空の一覧でも空の CSV が出力される',
-      'non_goals:',
-      '- Excel 形式への対応',
-      'estimate: M',
-      'created: 2026-10-02T09:00:00+09:00',
-      'updated: 2026-10-02T09:00:00+09:00',
-      '---',
-      '',
-      '主要シナリオ「一覧を見て、保存する」の最後のステップ。',
-      '',
-    ].join('\n')
-    const t = parseTask(text)
-    assert.equal(t.id, 'T-0012')
-    assert.deepEqual(t.depends_on, ['T-0003'])
-    assert.deepEqual(t.scope.paths, ['src/export/**', 'tests/export/**'])
-    assert.deepEqual(t.non_goals, ['Excel 形式への対応'])
-    assert.equal(t.created, '2026-10-02T09:00:00+09:00')
-    assert.equal(t.body, '主要シナリオ「一覧を見て、保存する」の最後のステップ。')
+  test('以前の形式（acceptance、deferred）も読める', () => {
+    const t = parseTask(['---', 'id: T-0001', 'title: x', 'kind: feature', 'priority: low', 'status: deferred', 'acceptance:', '  - 動く', 'defer:', '  until: beta', '  reason: P-FLOOR', '---', ''].join('\n'))
+    assert.equal(t.status, 'todo')
+    assert.deepEqual(t.checklist, items('動く'))
   })
 
   test('壊れたファイルは理由つきで拒否する', () => {

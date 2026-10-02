@@ -1,18 +1,10 @@
 // タスクファイル（YAML frontmatter + 本文）の読み書き。
 // 実行時依存を持たないため、タスクファイルで使う YAML の部分集合だけを扱う：
 // スカラー、フロー配列 [a, b]、ブロック配列 "- a"、入れ子のマップ。
+// チェックリストの項目 "- [x] やること" は、引用符がなくても文字列として読む。
 
-import {
-  DEFER_REASONS,
-  ESTIMATES,
-  ID_PATTERN,
-  KINDS,
-  PHASES,
-  PRIORITIES,
-  SEVERITIES,
-  STATUSES,
-} from './types.ts'
-import type { Task } from './types.ts'
+import { ID_PATTERN, KINDS, PRIORITIES, SEVERITIES, STATUSES } from './types.ts'
+import type { ChecklistItem, Task } from './types.ts'
 
 type Yaml = string | number | boolean | null | Yaml[] | { [key: string]: Yaml }
 type Line = { indent: number; text: string; no: number }
@@ -46,6 +38,9 @@ const splitFlow = (inner: string): string[] => {
   return items.map(s => s.trim())
 }
 
+/** チェックリストの項目の先頭（"[ ] " か "[x] "）。 */
+const CHECK_MARK = /^\[( |x|X)\](\s|$)/
+
 const parseScalar = (raw: string, no: number): Yaml => {
   const text = raw.trim()
   if (text.startsWith('"')) {
@@ -59,6 +54,7 @@ const parseScalar = (raw: string, no: number): Yaml => {
     if (!text.endsWith("'") || text.length < 2) throw new YamlError(`line ${no}: bad single-quoted string`)
     return text.slice(1, -1).replaceAll("''", "'")
   }
+  if (CHECK_MARK.test(text)) return text
   if (text.startsWith('[')) {
     if (!text.endsWith(']')) throw new YamlError(`line ${no}: unclosed [`)
     return splitFlow(text.slice(1, -1)).map(item => parseScalar(item, no))
@@ -174,42 +170,41 @@ const oneOf = <T extends string>(v: unknown, values: readonly T[], field: string
   throw new YamlError(`${field} must be one of ${values.join(' / ')} (got ${JSON.stringify(v)})`)
 }
 
+const toChecklist = (values: string[]): ChecklistItem[] =>
+  values.map(value => {
+    const match = /^\[( |x|X)\]\s*(.*)$/.exec(value)
+    return match ? { text: (match[2] ?? '').trim(), done: match[1] !== ' ' } : { text: value.trim(), done: false }
+  })
+
+/** 以前の形式の状態。後回しは todo として読む。 */
+const LEGACY_STATUS: Record<string, Task['status']> = { deferred: 'todo' }
+
 /** frontmatter の値をタスクに直す。形が崩れていれば例外。 */
 export const toTask = (data: { [key: string]: unknown }, body: string): Task => {
   const id = asString(data.id)
   if (!id || !ID_PATTERN.test(id)) throw new YamlError(`id must look like T-0001 (got ${JSON.stringify(data.id)})`)
   const title = asString(data.title)
   if (!title) throw new YamlError('title is required')
-  const scope = (data.scope ?? {}) as { [key: string]: unknown }
-  const defer = data.defer as { [key: string]: unknown } | null | undefined
+  const status = typeof data.status === 'string' && LEGACY_STATUS[data.status] ? LEGACY_STATUS[data.status] : data.status
+  // 以前の形式の acceptance は、未チェックのチェックリストとして読む
+  const checklist = data.checklist !== undefined ? data.checklist : data.acceptance
   const task: Task = {
     schema: typeof data.schema === 'number' ? data.schema : 1,
     id,
     title,
     kind: oneOf(data.kind, KINDS, 'kind', true)!,
     priority: oneOf(data.priority, PRIORITIES, 'priority', true)!,
-    status: oneOf(data.status, STATUSES, 'status', true)!,
+    status: oneOf(status, STATUSES, 'status', true)!,
     depends_on: asStrings(data.depends_on, 'depends_on'),
-    scope: { paths: asStrings(typeof scope === 'object' && scope ? scope.paths : undefined, 'scope.paths') },
-    acceptance: asStrings(data.acceptance, 'acceptance'),
-    non_goals: asStrings(data.non_goals, 'non_goals'),
+    checklist: toChecklist(asStrings(checklist, 'checklist')),
     created: asString(data.created) ?? '',
     updated: asString(data.updated) ?? '',
     body,
   }
-  const estimate = oneOf(data.estimate, ESTIMATES, 'estimate', false)
-  if (estimate) task.estimate = estimate
   const severity = oneOf(data.severity, SEVERITIES, 'severity', false)
   if (severity) task.severity = severity
   const impacts = asString(data.impacts)
   if (impacts) task.impacts = impacts
-  if (data.release_blocker === true) task.release_blocker = true
-  if (defer && typeof defer === 'object') {
-    task.defer = {
-      until: oneOf(defer.until, [...PHASES, 'post'] as const, 'defer.until', true)!,
-      reason: oneOf(defer.reason, DEFER_REASONS, 'defer.reason', true)!,
-    }
-  }
   const notes = asString(data.notes)
   if (notes) task.notes = notes
   return task
@@ -237,8 +232,7 @@ const scalar = (value: string): string => {
   return isPlain ? value : JSON.stringify(value)
 }
 
-const flow = (values: string[], quote: boolean): string =>
-  `[${values.map(v => (quote ? JSON.stringify(v) : scalar(v))).join(', ')}]`
+const flow = (values: string[]): string => `[${values.map(scalar).join(', ')}]`
 
 const block = (key: string, values: string[], indent = ''): string[] =>
   values.length === 0 ? [`${indent}${key}: []`] : [`${indent}${key}:`, ...values.map(v => `${indent}  - ${scalar(v)}`)]
@@ -252,22 +246,10 @@ export const serializeTask = (task: Task): string => {
   out.push(`kind: ${task.kind}`)
   out.push(`priority: ${task.priority}`)
   out.push(`status: ${task.status}`)
-  if (task.depends_on.length > 0) out.push(`depends_on: ${flow(task.depends_on, false)}`)
-  if (task.scope.paths.length > 0) {
-    out.push('scope:')
-    out.push(`  paths: ${flow(task.scope.paths, true)}`)
-  }
-  out.push(...block('acceptance', task.acceptance))
-  if (task.non_goals.length > 0) out.push(...block('non_goals', task.non_goals))
-  if (task.estimate) out.push(`estimate: ${task.estimate}`)
+  if (task.depends_on.length > 0) out.push(`depends_on: ${flow(task.depends_on)}`)
+  out.push(...block('checklist', task.checklist.map(item => `[${item.done ? 'x' : ' '}] ${item.text}`)))
   if (task.severity) out.push(`severity: ${task.severity}`)
   if (task.impacts) out.push(`impacts: ${scalar(task.impacts)}`)
-  if (task.release_blocker) out.push('release_blocker: true')
-  if (task.defer) {
-    out.push('defer:')
-    out.push(`  until: ${task.defer.until}`)
-    out.push(`  reason: ${task.defer.reason}`)
-  }
   if (task.notes) out.push(`notes: ${scalar(task.notes)}`)
   out.push(`created: ${scalar(task.created)}`)
   out.push(`updated: ${scalar(task.updated)}`)
