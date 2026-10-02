@@ -1,12 +1,12 @@
 {
   "name": "cc-lightpm",
   "owner": { "name": "ymsaki" },
-  "metadata": { "description": "LightPM: phase- and priority-driven task selection for Claude Code" },
+  "metadata": { "description": "LightPM: priority-based task management for Claude Code" },
   "plugins": [
     {
       "name": "lightpm",
       "source": "./",
-      "description": "リリースフェーズと優先度から「次にやる作業」を規則で1件に決める",
+      "description": "プロジェクトのタスクを優先度で管理し、一覧と進捗をユーザーに見えるようにする",
       "version": "0.1.0"
     }
   ]

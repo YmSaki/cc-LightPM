@@ -1,5 +1,5 @@
-import { defaultConfig, defaultState } from '../../src/core/types.ts'
-import type { Phase, Snapshot, Task } from '../../src/core/types.ts'
+import { defaultState } from '../../src/core/types.ts'
+import type { Snapshot, Task } from '../../src/core/types.ts'
 
 let counter = 0
 
@@ -10,19 +10,17 @@ export const task = (over: Partial<Task> & { id: string }): Task => ({
   priority: 'mid',
   status: 'todo',
   depends_on: [],
-  scope: { paths: ['src/**'] },
-  acceptance: ['works'],
-  non_goals: [],
+  checklist: [{ text: 'works', done: false }],
   created: `2026-10-02T00:00:${String(counter++ % 60).padStart(2, '0')}.000Z`,
   updated: '2026-10-02T00:00:00.000Z',
   body: '',
   ...over,
 })
 
-export const snapshot = (tasks: Task[], phase: Phase = 'alpha'): Snapshot => {
-  const state = defaultState(phase)
+export const snapshot = (tasks: Task[]): Snapshot => {
+  const state = defaultState()
   state.nextId = tasks.length + 1
-  return { state, config: defaultConfig(), tasks }
+  return { state, tasks }
 }
 
 export const NOW = '2026-10-02T09:00:00.000Z'

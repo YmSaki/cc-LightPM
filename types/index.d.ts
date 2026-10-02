@@ -1,25 +1,30 @@
+export type LightpmProgress = { done: number; total: number }
+
 export type LightpmSummary = {
-  phase: 'alpha' | 'beta' | 'rc' | 'gm'
-  active: { id: string; title: string; priority: string; kind: string; paths: string[] } | null
-  counts: { todo: number; in_progress: number; done: number; deferred: number; dropped: number }
+  /** 作業中のタスク（優先度の高い順）。 */
+  active: { id: string; title: string; priority: string; progress: LightpmProgress }[]
+  /** 最優先の未着手タスク。 */
+  top: { id: string; title: string; priority: string } | null
+  counts: { todo: number; in_progress: number; done: number; dropped: number }
   /** 読み込めなかった .pm/ のファイルの数。 */
   errors: number
 }
 
-/** タスク一覧のペインの1行。pm_next が選ぶ順に並ぶ。 */
+/** タスク一覧のペインの1行。 */
 export type LightpmBoardRow = {
   id: string
   title: string
   kind: string
   priority: string
-  /** 実効優先度（依存を考慮した優先度）。 */
-  eff: string
-  /** active: 作業中 / next: 次にやる順 / blocked: 前提の完了待ち / later: 後回し */
-  group: 'active' | 'next' | 'blocked' | 'later'
-  note: string | null
-  acceptance: string[]
-  paths: string[]
-  dependsOn: string[]
+  status: 'todo' | 'in_progress' | 'done' | 'dropped'
+  /** active: 作業中 / todo: 未着手 / done: 完了 */
+  group: 'active' | 'todo' | 'done'
+  progress: LightpmProgress
+  checklist: { text: string; done: boolean }[]
+  /** 前提のタスクと、その状態（未着手、作業中、完了、取り下げ、不明）。 */
+  dependsOn: { id: string; status: string }[]
+  severity: string | null
+  impacts: string | null
   body: string
 }
 
@@ -30,6 +35,8 @@ declare module 'claude-code' {
       board: LightpmBoardRow[]
       /** 一覧で展開しているタスクの id。 */
       expanded: string[]
+      /** 一覧で完了済みのタスクを表示するか。 */
+      showDone: boolean
     }
   }
 }

@@ -19,12 +19,12 @@ CI では、プルリクエストごとにコアの単体テストを回しま�
 ## ソースの構成
 
 ```text
-src/core/              純粋関数（型、ポリシー、frontmatter、選択、一覧の並び、登録、更新、完了、文面）
+src/core/              純粋関数（型、優先度と並び順、frontmatter、登録と更新、文面）
 src/io/                .pm/ の読み書き
 hooks/                 モッドの入口
-skills/、agents/       スキルとサブエージェント
+skills/                スキル
 types/                 モッドが $.state に置く値の型
-tests/core/*.spec.ts   コアの単体テスト（表駆動、読み込み順を入れ替える性質テスト、性能）
+tests/core/*.spec.ts   コアの単体テスト
 tests/mod/*.test.ts    モッドのテスト（$.fs をメモリ上で置き換える）
 ```
 
@@ -33,10 +33,8 @@ tests/mod/*.test.ts    モッドのテスト（$.fs をメモリ上で置き換�
 | 種類 | 名前 | 役割 |
 | --- | --- | --- |
 | スキル | `pm-plan` | 目的を分解し、分類して登録する |
-| スキル | `pm-run` | `pm_next` から完了までのループを回す |
 | スキル | `pm-triage` | 気づいた作業を分類して登録する |
-| サブエージェント | `lightpm:pm-implementer` | 1タスクを実装し、JSON で報告する |
-| モッド | `hooks/lightpm.tsx` | ツールとコマンドの処理、プロンプトへの要約の追加、帯、タスク一覧のペイン、監査ログ |
+| モッド | `hooks/lightpm.tsx` | ツールとコマンドの処理、プロンプトへの要約の追加、帯、タスク一覧のペイン、変更履歴 |
 
 モッドが使う API は `$.fs`（`.pm/` の読み書きのみ）、`$.state`、`$.ui`、`$.tool`、`$.command`、`$.clock`、`$.session.root` です。
 ネットワークも LLM も呼ばないので、モッドがプランや API キーを消費することはありません。
