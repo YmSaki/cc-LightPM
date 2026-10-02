@@ -213,6 +213,12 @@ describe('選択アルゴリズム', () => {
     assert.equal(done.result.kind, 'done')
   })
 
+  test('タスクが1件もなければフェーズを進めずに待つ', () => {
+    const out = nextTask(snapshot([]), NOW)
+    assert.equal(out.result.kind, 'wait')
+    assert.equal(out.state.phase, 'alpha')
+  })
+
   test('dryRun は状態を変えない', () => {
     const snap = snapshot([task({ id: 'T-0001', kind: 'feature', priority: 'max' })])
     const out = nextTask(snap, NOW, { dryRun: true })

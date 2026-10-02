@@ -82,7 +82,7 @@ export const formatNext = (result: NextResult, dryRun = false): string => {
     return out.join('\n')
   }
   if (result.kind === 'wait') {
-    out.push(`待ち: 着手できるタスクがなく、${PHASE_LABEL[result.phase]} を抜けられない。ループを終えて人に報告してください。`)
+    out.push('待ち: 着手できるタスクがありません。ループを終えて人に報告してください。')
     out.push(...result.reasons.map(r => `- ${r}`))
     return out.join('\n')
   }

@@ -258,6 +258,12 @@ export const nextTask = (snapshot: Snapshot, now: string, options: { dryRun?: bo
   }
   if (draft.state.active !== null) draft.state.active = null
 
+  // タスクが1件もなければ、フェーズを進めずに登録を待つ
+  if (draft.tasks.size === 0) {
+    const reasons = ['タスクが登録されていません。/lightpm:pm-plan か pm_add で登録してください']
+    return draft.outcome({ kind: 'wait', phase: draft.state.phase, reasons, phaseAdvanced: advanced, deferred, restored })
+  }
+
   for (;;) {
     const phase = draft.state.phase
     const eff = effectivePriorities(draft.list())
