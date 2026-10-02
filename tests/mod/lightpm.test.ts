@@ -1,4 +1,4 @@
-// モッドのテスト（claude plugin test）。$.fs と git をメモリ上の Map で置き換えて動かす。
+// モッドのテスト（claude plugin test）。$.fs をメモリ上の Map で置き換えて動かす。
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
@@ -8,12 +8,11 @@ const ROOT = '/repo'
 type World = {
   files: Map<string, string>
   writes: string[]
-  git: { changed: string[]; untracked: string[] }
 }
 
 const world = (on: On, seed: Record<string, string> = {}): World => {
   const files = new Map(Object.entries(seed).map(([k, v]) => [`${ROOT}/${k}`, v]))
-  const w: World = { files, writes: [], git: { changed: [], untracked: [] } }
+  const w: World = { files, writes: [] }
   const isDir = (path: string): boolean => [...files.keys()].some(k => k.startsWith(`${path.replace(/\/$/, '')}/`))
   mock.clock(on, { now: Date.parse('2026-10-02T09:00:00.000Z') })
   on('session.root', () => ({ value: ROOT }))
@@ -38,19 +37,6 @@ const world = (on: On, seed: Record<string, string> = {}): World => {
     }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
   })
-  on('process.run', ($, e) => {
-    const args = e.argv.slice(3).join(' ')
-    const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
-    if (args.startsWith('rev-parse --is-inside-work-tree')) return ok('true\n')
-    if (args.startsWith('stash create')) return ok('')
-    if (args.startsWith('rev-parse HEAD')) return ok('abc123\n')
-    if (args.startsWith('ls-files')) return ok(w.git.untracked.map(f => `${f}\0`).join(''))
-    if (args.startsWith('diff')) return ok(w.git.changed.map(f => `${f}\0`).join(''))
-    return { value: { exitCode: 1, stdout: '', stderr: 'unknown', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
-  on('ui.toast', () => ({ value: undefined }))
-  on('tool.call', { tool: 'Edit' }, () => ({ result: 'edited' }))
-  on('tool.call', { tool: 'Write' }, () => ({ result: 'written' }))
   return w
 }
 
@@ -91,10 +77,7 @@ describe('ツール', () => {
     expect(next).toContain('タスク契約 T-0001')
     const state = JSON.parse(w.files.get(`${ROOT}/.pm/state.json`) ?? '{}')
     expect(state.active).toBe('T-0001')
-    expect(state.baseline).toEqual({ ref: 'abc123', untracked: [] })
 
-    w.git.changed = ['src/export/csv.ts']
-    w.git.untracked = ['tests/export/csv.test.ts']
     const done = text(
       await $.tool.call({
         tool: 'mcp__lightpm__pm_complete',
@@ -105,7 +88,6 @@ describe('ツール', () => {
       } as never),
     )
     expect(done).toContain('T-0001 を完了にした')
-    expect(done).toContain('git diff')
     expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('status: done')
 
     const log = w.files.get(`${ROOT}/.pm/log/2026-10.jsonl`) ?? ''
@@ -113,29 +95,10 @@ describe('ツール', () => {
     expect(events).toEqual(['task.created', 'task.created', 'task.selected', 'task.completed'])
   })
 
-  test('AC-8: 範囲外の変更があれば完了にしない', async ($, on) => {
-    const w = world(on)
-    await $.tool.call(add(MAX_FEATURE))
-    await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never)
-    w.git.changed = ['src/export/csv.ts', 'src/ui/theme.ts']
-    const out = text(
-      await $.tool.call({
-        tool: 'mcp__lightpm__pm_complete',
-        taskId: 'T-0001',
-        status: 'done',
-        acceptance: [{ item: '一覧画面から CSV をダウンロードできる', met: true }],
-      } as never),
-    )
-    expect(out).toContain('完了にしていない')
-    expect(out).toContain('src/ui/theme.ts')
-    expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('status: in_progress')
-    expect(w.files.get(`${ROOT}/.pm/log/2026-10.jsonl`)).toContain('"event":"scope.violation"')
-  })
-
   test('入力の誤りはエラーとしてモデルに返す', async ($, on) => {
     world(on)
-    const out = (await $.tool.call(add({ ...MAX_FEATURE, scope_paths: ['**'] }))) as { deny?: string }
-    expect(out.deny).toContain('広すぎます')
+    const out = (await $.tool.call(add({ ...MAX_FEATURE, priority: 'urgent' }))) as { deny?: string }
+    expect(out.deny).toContain('priority は xlow / low / mid / high / xhigh / max のいずれかです')
   })
 
   test('並行した pm_add でも id が重複しない', async ($, on) => {
@@ -154,40 +117,8 @@ describe('ツール', () => {
     await $.tool.call({ tool: 'mcp__lightpm__pm_complete', taskId: 'T-0001', status: 'failed', notes: 'x' } as never)
     await $.tool.call({ tool: 'mcp__lightpm__pm_status' } as never)
     await $.command.run(pm('phase set beta テスト'))
-    await $.command.run(pm('enforce block'))
     expect(w.writes.length > 0).toBe(true)
     expect(w.writes.filter(p => !p.startsWith(`${ROOT}/.pm/`))).toEqual([])
-  })
-})
-
-describe('ガード', () => {
-  test('AC-7: block では範囲外の編集を拒否し、範囲内は通す', async ($, on) => {
-    world(on, { '.pm/config.json': JSON.stringify({ schema: 1, enforcement: 'block', scopeVerify: true, policy: {} }) })
-    await $.tool.call(add(MAX_FEATURE))
-    await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never)
-    const outside = (await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/src/ui/theme.ts`, old_string: 'a', new_string: 'b' } as never)) as { deny?: string }
-    expect(outside.deny).toBe(
-      'LightPM: T-0001 の範囲外です（src/ui/theme.ts）。直さずに mcp__lightpm__pm_add で登録し、T-0001 の作業を続けてください。範囲: src/export/**, tests/export/**',
-    )
-    const inside = (await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/src/export/csv.ts`, old_string: 'a', new_string: 'b' } as never)) as { deny?: string; result?: unknown }
-    expect(inside.deny).toBeUndefined()
-    expect(inside.result).toBe('edited')
-  })
-
-  test('warn（既定）は編集を通し、モデルへの注意と監査ログを残す', async ($, on) => {
-    const w = world(on)
-    await $.tool.call(add(MAX_FEATURE))
-    const ran = (await $.tool.call({ tool: 'Write', file_path: `${ROOT}/src/other.ts`, content: 'x' } as never)) as { deny?: string; context?: string[] }
-    expect(ran.deny).toBeUndefined()
-    expect((ran.context ?? []).join('\n')).toContain('作業中のタスクがありません')
-    expect(w.files.get(`${ROOT}/.pm/log/2026-10.jsonl`)).toContain('"event":"guard.violation"')
-  })
-
-  test('.pm/ がないプロジェクトでは何もしない', async ($, on) => {
-    const w = world(on)
-    const ran = (await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/src/a.ts`, old_string: 'a', new_string: 'b' } as never)) as { context?: string[] }
-    expect(ran.context).toBeUndefined()
-    expect(w.writes).toEqual([])
   })
 })
 
@@ -243,7 +174,7 @@ describe('セッション・プロンプト・帯', () => {
     await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never)
     await $.prompt.submit(prompt('hello'))
     expect(context.length).toBe(1)
-    expect(context[0]).toContain('作業中 T-0001「CSV エクスポートを実装する」')
+    expect(context[0]).toContain('今やること: T-0001「CSV エクスポートを実装する」')
     expect((context[0] ?? '').length <= 600).toBe(true)
   })
 

@@ -6,41 +6,34 @@ import { byId, effectivePriorities, exitCheck } from './select.ts'
 import type { NextResult } from './select.ts'
 import type { CompleteResult } from './ops.ts'
 import { PHASES, STATUSES, priorityAt } from './types.ts'
-import type { Enforcement, Phase, Snapshot, Status, Task } from './types.ts'
+import type { Phase, Snapshot, Status, Task } from './types.ts'
 
 export type Summary = {
-  root: string
   phase: Phase
   active: { id: string; title: string; priority: string; kind: string; paths: string[] } | null
   counts: Record<Status, number>
-  enforcement: Enforcement
-  violations: number
   errors: number
 }
 
 export const PHASE_LABEL: Record<Phase, string> = { alpha: 'Alpha', beta: 'Beta', rc: 'RC', gm: 'GM' }
 
-export const summarize = (snapshot: Snapshot, root: string, violations: number, errors: number): Summary => {
+export const summarize = (snapshot: Snapshot, errors: number): Summary => {
   const counts = Object.fromEntries(STATUSES.map(s => [s, 0])) as Record<Status, number>
   for (const t of snapshot.tasks) counts[t.status] += 1
   const active = snapshot.state.active ? snapshot.tasks.find(t => t.id === snapshot.state.active) : undefined
   return {
-    root,
     phase: snapshot.state.phase,
     active: active
       ? { id: active.id, title: active.title, priority: active.priority, kind: active.kind, paths: active.scope.paths }
       : null,
     counts,
-    enforcement: snapshot.config.enforcement,
-    violations,
     errors,
   }
 }
 
-const RULES = [
-  'scope.paths の外を編集しない',
-  '範囲外の問題を見つけたら直さず、報告の discovered に書く（その場で直さない）',
-  'acceptance にないことをしない。non_goals は特に守る',
+const HOW = [
+  'acceptance をすべて満たしたら完了。scope.paths は主に触るファイルの目安',
+  '作業中に気づいた別の作業は、報告の discovered に書く。登録されて優先度順に回ってくる',
 ]
 
 /** pm-implementer に渡すタスク契約。 */
@@ -52,8 +45,8 @@ export const taskContract = (task: Task, phase: Phase): string =>
     serializeTask(task).trimEnd(),
     '```',
     '',
-    '守るべきルール:',
-    ...RULES.map(r => `- ${r}`),
+    '進め方:',
+    ...HOW.map(r => `- ${r}`),
     '',
     '報告の形式（pm_complete にそのまま渡す）:',
     '```json',
@@ -63,7 +56,7 @@ export const taskContract = (task: Task, phase: Phase): string =>
         status: 'done | failed',
         changedFiles: ['変更したファイル（ルートからの相対パス）'],
         acceptance: task.acceptance.map(item => ({ item, met: true })),
-        discovered: [{ title: '範囲外で見つけた問題', kind: 'bug', severity: 'S2', impacts: task.id }],
+        discovered: [{ title: '作業中に気づいた別の作業', kind: 'bug', severity: 'S2', impacts: task.id }],
         notes: 'failed のときは原因',
       },
       null,
@@ -121,11 +114,11 @@ export const formatStatus = (snapshot: Snapshot, errors: readonly string[], dryR
   const eff = effectivePriorities(sorted)
   const count = (s: Status): number => sorted.filter(t => t.status === s).length
   const out: string[] = [
-    `LightPM — フェーズ ${PHASE_LABEL[state.phase]}、強制レベル ${snapshot.config.enforcement}`,
+    `LightPM — フェーズ ${PHASE_LABEL[state.phase]}`,
     `タスク: todo ${count('todo')} / 作業中 ${count('in_progress')} / 後回し ${count('deferred')} / 完了 ${count('done')} / 取り下げ ${count('dropped')}`,
   ]
   const active = state.active ? sorted.find(t => t.id === state.active) : undefined
-  out.push(active ? `作業中: ${line(active)}  範囲: ${active.scope.paths.join(', ') || '(なし)'}` : '作業中: なし')
+  out.push(active ? `作業中: ${line(active)}` : '作業中: なし')
   if (dryRunNext) {
     if (dryRunNext.kind === 'task' && !dryRunNext.resumed) out.push(`次の候補: ${line(dryRunNext.task)}`)
     if (dryRunNext.kind === 'wait') out.push('次の候補: なし（待ち）')
@@ -165,19 +158,12 @@ export const formatList = (tasks: readonly Task[], status?: string): string => {
   return list.map(t => `${t.status.padEnd(11)} ${line(t)}`).join('\n')
 }
 
-const fileList = (files: readonly string[], limit = 20): string[] => [
-  ...files.slice(0, limit).map(f => `- ${f}`),
-  ...(files.length > limit ? [`- …ほか ${files.length - limit} 件`] : []),
-]
-
 export const formatComplete = (result: CompleteResult): string => {
   switch (result.kind) {
     case 'completed':
       return [
-        `${result.task.id} を完了にした（範囲の検証: ${result.verification}）。`,
-        `変更ファイル（${result.files.length} 件）:`,
-        ...fileList(result.files),
-        '報告の discovered があれば、直さずに pm_add で登録してから pm_next で次のタスクを取得してください。',
+        `${result.task.id} を完了にした。`,
+        '報告の discovered があれば pm_add で登録してから、pm_next で次のタスクを取得してください。',
       ].join('\n')
     case 'failed':
       return result.stop
@@ -185,15 +171,9 @@ export const formatComplete = (result: CompleteResult): string => {
         : `${result.task.id} を失敗として todo に戻した（${result.failures} 回目）。pm_next でもう一度取得できます。`
     case 'incomplete':
       return [
-        `${result.task.id} は完了にしていない: 満たしていない完了条件があります。`,
+        `${result.task.id} はまだ完了ではありません。残っている完了条件:`,
         ...result.unmet.map(u => `- ${u}`),
         '作業を続けるか、満たせないなら status: failed で報告してください。',
-      ].join('\n')
-    case 'scope_violation':
-      return [
-        `${result.task.id} は完了にしていない: 範囲（${result.task.scope.paths.join(', ')}）の外のファイルが変更されています。`,
-        ...fileList(result.files),
-        '範囲外の変更を元に戻すか、必要な変更なら理由を添えて pm_update で scope_paths を広げるか別タスクに分けてから、もう一度 pm_complete を呼んでください。',
       ].join('\n')
   }
 }
@@ -202,17 +182,16 @@ export const formatComplete = (result: CompleteResult): string => {
 export const contextFor = (summary: Summary): string => {
   const head = `[LightPM] フェーズ ${PHASE_LABEL[summary.phase]}。`
   const body = summary.active
-    ? `作業中 ${summary.active.id}「${summary.active.title}」（${summary.active.priority} ${summary.active.kind}、範囲: ${summary.active.paths.join(', ') || 'なし'}）。範囲の外は編集しない。範囲外の問題は直さずに mcp__lightpm__pm_add で登録する。終わったら mcp__lightpm__pm_complete で報告し、mcp__lightpm__pm_next で次を取る。`
-    : `作業中のタスクはない（todo ${summary.counts.todo}、後回し ${summary.counts.deferred}）。コードを編集する作業なら、先に mcp__lightpm__pm_next で次のタスクを取得する。新しい作業は mcp__lightpm__pm_add で登録してから着手する。`
+    ? `今やること: ${summary.active.id}「${summary.active.title}」（${summary.active.priority} ${summary.active.kind}）。終わったら mcp__lightpm__pm_complete で報告し、mcp__lightpm__pm_next で次を取る。気づいた別の作業は mcp__lightpm__pm_add で登録すれば、優先度順に回ってくる。`
+    : `作業中のタスクはない（todo ${summary.counts.todo}、後回し ${summary.counts.deferred}）。作業を始めるなら mcp__lightpm__pm_next で次のタスクを取る。新しい作業は mcp__lightpm__pm_add で登録する。`
   const text = head + body
   return text.length <= 600 ? text : `${text.slice(0, 599)}…`
 }
 
 export const bandText = (summary: Summary): string => {
   const active = summary.active ? `▶ ${summary.active.id} ${summary.active.title} [${summary.active.priority}]` : '作業中なし'
-  const warn = summary.violations > 0 ? ` · 範囲外 ${summary.violations}` : ''
   const errors = summary.errors > 0 ? ` · 読込エラー ${summary.errors}` : ''
-  return `LightPM ${PHASE_LABEL[summary.phase]} · ${active} · todo ${summary.counts.todo} · 後回し ${summary.counts.deferred} · 完了 ${summary.counts.done}${warn}${errors}`
+  return `LightPM ${PHASE_LABEL[summary.phase]} · ${active} · todo ${summary.counts.todo} · 後回し ${summary.counts.deferred} · 完了 ${summary.counts.done}${errors}`
 }
 
 /** /pm why：監査ログからそのタスクが選ばれた、または後回しになった理由を出す。 */
@@ -252,16 +231,10 @@ export const formatWhy = (taskId: string, task: Task | undefined, events: readon
         out.push(`${ts} 再分類: ${JSON.stringify(e.changes)} — ${e.reason}`)
         break
       case 'task.completed':
-        out.push(`${ts} 完了（検証: ${e.verification}）`)
+        out.push(`${ts} 完了`)
         break
       case 'task.failed':
         out.push(`${ts} 失敗 ${e.failures} 回目${e.notes ? `: ${e.notes}` : ''}`)
-        break
-      case 'scope.violation':
-        out.push(`${ts} 範囲外の変更で完了を保留: ${(e.files as string[]).join(', ')}`)
-        break
-      case 'guard.violation':
-        out.push(`${ts} ガード: ${e.path}（${e.level} → ${e.result}）`)
         break
       default:
         out.push(`${ts} ${String(e.event)}`)

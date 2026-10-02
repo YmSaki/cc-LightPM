@@ -1,6 +1,5 @@
-// pm_add / pm_update / pm_complete / フェーズ変更 / ガード判定。すべて純粋関数。
+// pm_add / pm_update / pm_complete / フェーズ変更。すべて純粋関数。
 
-import { matchesPattern, inScope, isTooBroad, normalizePath } from './glob.ts'
 import { admits, bugPriority, deferUntil } from './policy.ts'
 import { Draft, effectivePriorities } from './select.ts'
 import type { Outcome } from './select.ts'
@@ -14,7 +13,7 @@ import {
   formatId,
   ordinal,
 } from './types.ts'
-import type { Estimate, Kind, Phase, Priority, Severity, Snapshot, Task } from './types.ts'
+import type { Estimate, Phase, Priority, Severity, Snapshot, Task } from './types.ts'
 
 export class InputError extends Error {}
 
@@ -23,6 +22,9 @@ const fail = (message: string): never => {
 }
 
 const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, ' ').trim()
+
+const normalizePath = (path: string): string =>
+  path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/').replace(/\/$/, '')
 
 const strings = (value: unknown, field: string): string[] | undefined => {
   if (value === undefined || value === null) return undefined
@@ -36,13 +38,8 @@ const pick = <T extends string>(value: unknown, values: readonly T[], field: str
   return fail(`${field} は ${values.join(' / ')} のいずれかです（${JSON.stringify(value)} は不可）`)
 }
 
-const checkPaths = (paths: string[] | undefined, kind: Kind): string[] => {
-  const list = (paths ?? []).map(normalizePath).filter(p => p !== '')
-  if (kind !== 'release' && list.length === 0) fail('scope_paths は必須です（release を除く）。完了に必要な最小のパスを glob で指定してください')
-  const broad = list.filter(isTooBroad)
-  if (broad.length > 0) fail(`scope_paths が広すぎます: ${broad.join(', ')}。完了に必要な最小のパスにしてください`)
-  return list
-}
+/** 主に触るファイルの目安。実装者への手がかりで、制限ではない。 */
+const toPaths = (paths: string[] | undefined): string[] => (paths ?? []).map(normalizePath).filter(p => p !== '')
 
 const checkDeps = (deps: string[] | undefined, self: string | null, tasks: Map<string, Task>): string[] => {
   const list = [...new Set(deps ?? [])]
@@ -135,7 +132,7 @@ export const addTask = (snapshot: Snapshot, input: AddInput, now: string, actor 
     priority: priority as Priority,
     status: 'todo',
     depends_on: checkDeps(strings(input.depends_on, 'depends_on'), null, draft.tasks),
-    scope: { paths: checkPaths(strings(input.scope_paths, 'scope_paths'), kind) },
+    scope: { paths: toPaths(strings(input.scope_paths, 'scope_paths')) },
     acceptance,
     non_goals: strings(input.non_goals, 'non_goals') ?? [],
     created: now,
@@ -214,7 +211,7 @@ export const updateTask = (snapshot: Snapshot, input: UpdateInput, now: string, 
     if (cycle) fail(`依存が循環します: ${cycle.join(' → ')}`)
   }
   const paths = strings(input.scope_paths, 'scope_paths')
-  if (paths) task.scope.paths = checkPaths(paths, task.kind)
+  if (paths) task.scope.paths = toPaths(paths)
   const acceptance = strings(input.acceptance, 'acceptance')
   if (acceptance) {
     if (acceptance.length === 0) fail('acceptance を空にはできません')
@@ -245,7 +242,6 @@ export const updateTask = (snapshot: Snapshot, input: UpdateInput, now: string, 
     delete task.defer
     if (draft.state.active === id) {
       draft.state.active = null
-      draft.state.baseline = null
       notes.push('作業中のタスクではなくなった')
     }
   }
@@ -286,36 +282,23 @@ export const updateTask = (snapshot: Snapshot, input: UpdateInput, now: string, 
 
 export type CompleteInput = Readonly<Record<string, unknown>>
 
-export type Detected = { files: string[] | null; source: 'git' | 'none'; note?: string }
-
 export type CompleteResult =
-  | { kind: 'completed'; task: Task; files: string[]; verification: string }
+  | { kind: 'completed'; task: Task; files: string[] }
   | { kind: 'failed'; task: Task; failures: number; stop: boolean }
   | { kind: 'incomplete'; task: Task; unmet: string[] }
-  | { kind: 'scope_violation'; task: Task; files: string[] }
 
-const PM_DIR = /^\.pm(\/|$)/
 /** 監査ログに残すファイル名の上限（1行が大きくなりすぎないように）。 */
 const LOG_FILES = 200
 
-export const completeTask = (
-  snapshot: Snapshot,
-  input: CompleteInput,
-  detected: Detected,
-  now: string,
-  actor = 'main',
-): Outcome<CompleteResult> => {
+export const completeTask = (snapshot: Snapshot, input: CompleteInput, now: string, actor = 'main'): Outcome<CompleteResult> => {
   const draft = new Draft(snapshot, now)
   const id = typeof input.taskId === 'string' ? input.taskId.trim() : ''
   const task = draft.tasks.get(id) ?? fail(`タスク ${id || '(taskId なし)'} は存在しません`)
-  if (task.status !== 'in_progress') fail(`${id} は作業中ではありません（status: ${task.status}）。pm_next で取得したタスクだけを完了にできます`)
+  if (task.status !== 'in_progress') fail(`${id} は作業中ではありません（status: ${task.status}）。pm_next で取得したタスクを完了にします`)
   const status = pick(input.status, ['done', 'failed'] as const, 'status') ?? fail('status は done か failed です')
   const notes = typeof input.notes === 'string' ? oneLine(input.notes) : ''
   const release = (): void => {
-    if (draft.state.active === id) {
-      draft.state.active = null
-      draft.state.baseline = null
-    }
+    if (draft.state.active === id) draft.state.active = null
   }
 
   if (status === 'failed') {
@@ -329,7 +312,7 @@ export const completeTask = (
     return draft.outcome({ kind: 'failed', task, failures, stop: failures >= 2 })
   }
 
-  // 完了条件
+  // 完了条件をすべて満たしたか
   const reported = Array.isArray(input.acceptance)
     ? (input.acceptance as unknown[]).filter((a): a is { item?: unknown; met?: unknown } => typeof a === 'object' && a !== null)
     : []
@@ -343,30 +326,14 @@ export const completeTask = (
     return draft.outcome({ kind: 'incomplete', task, unmet })
   }
 
-  // 範囲の検証
-  const files = [
-    ...new Set([...(strings(input.changedFiles, 'changedFiles') ?? []), ...(detected.files ?? [])].map(normalizePath)),
-  ]
-    .filter(f => f !== '' && !PM_DIR.test(f))
-    .sort()
-  const verify = snapshot.config.scopeVerify && task.scope.paths.length > 0
-  const outside = verify ? files.filter(f => !inScope(f, task.scope.paths)) : []
-  if (outside.length > 0) {
-    task.scope_violation = outside.slice(0, 50)
-    draft.put(task)
-    draft.log({ event: 'scope.violation', actor, taskId: id, files: outside.slice(0, LOG_FILES), count: outside.length, source: detected.source })
-    return draft.outcome({ kind: 'scope_violation', task, files: outside })
-  }
-
-  const verification = !verify ? 'off' : detected.source === 'git' ? 'git diff + 報告' : '報告のみ（git なし）'
+  const files = [...new Set((strings(input.changedFiles, 'changedFiles') ?? []).map(normalizePath))].filter(f => f !== '').sort()
   task.status = 'done'
   delete task.failures
-  delete task.scope_violation
   if (notes) task.notes = notes
   release()
   draft.put(task)
-  draft.log({ event: 'task.completed', actor, taskId: id, files: files.slice(0, LOG_FILES), count: files.length, verification, acceptance: task.acceptance.length })
-  return draft.outcome({ kind: 'completed', task, files, verification })
+  draft.log({ event: 'task.completed', actor, taskId: id, files: files.slice(0, LOG_FILES), count: files.length, acceptance: task.acceptance.length })
+  return draft.outcome({ kind: 'completed', task, files })
 }
 
 // ---- フェーズの手動変更 ----
@@ -379,44 +346,3 @@ export const setPhase = (snapshot: Snapshot, input: { phase?: unknown; reason?: 
   draft.log({ event: 'phase.set', actor, from, to, reason: typeof input.reason === 'string' && input.reason !== '' ? input.reason : null })
   return draft.outcome({ from, to })
 }
-
-// ---- ガード ----
-
-export type GuardInput = {
-  /** プロジェクトルートからの相対パス。ルートの外なら null。 */
-  path: string | null
-  active: { id: string; paths: readonly string[] } | null
-}
-
-export type GuardVerdict =
-  | { violation: false }
-  | { violation: true; kind: 'pm-dir' | 'no-active' | 'out-of-scope'; taskId: string | null; message: string }
-
-export const judgeEdit = (input: GuardInput): GuardVerdict => {
-  const { path, active } = input
-  if (path === null) return { violation: false }
-  if (PM_DIR.test(path)) {
-    return {
-      violation: true,
-      kind: 'pm-dir',
-      taskId: active?.id ?? null,
-      message: `LightPM: .pm/ は直接編集しません（${path}）。状態の変更は mcp__lightpm__pm_* ツールを通してください。`,
-    }
-  }
-  if (!active) {
-    return {
-      violation: true,
-      kind: 'no-active',
-      taskId: null,
-      message: `LightPM: 作業中のタスクがありません（${path}）。先に mcp__lightpm__pm_next でタスクを取得してください。範囲外の問題なら直さずに mcp__lightpm__pm_add で登録してください。`,
-    }
-  }
-  if (active.paths.length === 0 || active.paths.some(p => matchesPattern(path, p))) return { violation: false }
-  return {
-    violation: true,
-    kind: 'out-of-scope',
-    taskId: active.id,
-    message: `LightPM: ${active.id} の範囲外です（${path}）。直さずに mcp__lightpm__pm_add で登録し、${active.id} の作業を続けてください。範囲: ${active.paths.join(', ')}`,
-  }
-}
-

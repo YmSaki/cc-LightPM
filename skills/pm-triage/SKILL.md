@@ -1,18 +1,18 @@
 ---
 name: pm-triage
-description: 作業中に見つけた範囲外の問題や、人から受けた新しい依頼を、LightPM のルーブリックで分類して pm_add で登録する（その場では直さない）。「これもタスクにして」「後でやる」「バグを見つけた」ときや、pm-implementer の報告に discovered があるときに使う。
+description: 作業中に気づいた別の作業や、人から受けた新しい依頼を、LightPM のルーブリックで分類して pm_add で登録する。「これもタスクにして」「後でやる」「バグを見つけた」ときや、pm-implementer の報告に discovered があるときに使う。
 argument-hint: "[問題・依頼の説明]"
 ---
 
-# LightPM: 発見した問題の登録
+# LightPM: 作業の登録
 
 対象: $ARGUMENTS
 
-見つけた問題は**直さずに登録する**。着手する順番は LightPM の規則が決める。
+気づいた作業を登録して、優先度順の列に載せる。着手する順番は LightPM の規則が決める。
 
 ## 手順
 
-1. 内容を読み、必要なら関係するコードを読む（編集はしない）。既存のタスクと重複していないか `mcp__lightpm__pm_status` で確かめる。重複なら登録せず、既存タスクの ID を伝える。
+1. 内容を読み、必要なら関係するコードを読む。既存のタスクと重複していないか `mcp__lightpm__pm_status` で確かめる。重複なら既存タスクの ID を伝える。
 2. `kind` を決める: `feature` / `bug` / `refactor` / `polish` / `chore` / `release`。
 3. 優先度を決める。
    - **bug**: `severity` を決め、`impacts` に影響を受けるタスク ID を入れる。優先度は表から自動で決まる（`priority` は不要）。影響先がタスクになっていなければ、機能名を `impacts` に書き、その機能の優先度を `impact_priority` に渡す。
@@ -25,6 +25,6 @@ argument-hint: "[問題・依頼の説明]"
      5. 見た目・文言・軽微な改善 → `low`
      6. 将来の候補 → `xlow`
    - 迷ったら**低い方**。
-4. `scope_paths`（直すのに必要な最小のパス。テストも含める）、`acceptance`（確かめられる完了条件）、必要なら `non_goals` と `depends_on` を決める。
+4. `acceptance`（確かめられる完了条件）を決める。分かれば `scope_paths`（主に触るファイルの目安）と `depends_on` も付ける。
 5. `mcp__lightpm__pm_add` で登録する。`reason` に分類の理由を1文で書く。
 6. 結果（ID、優先度、todo か後回しか）を1行で伝える。今の作業に戻る。

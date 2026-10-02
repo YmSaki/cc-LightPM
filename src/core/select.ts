@@ -256,10 +256,7 @@ export const nextTask = (snapshot: Snapshot, now: string, options: { dryRun?: bo
     if (draft.state.active !== resumed.id) draft.state.active = resumed.id
     return draft.outcome({ kind: 'task', phase: draft.state.phase, task: resumed, resumed: true, phaseAdvanced: [], deferred, restored, trace: null })
   }
-  if (draft.state.active !== null) {
-    draft.state.active = null
-    draft.state.baseline = null
-  }
+  if (draft.state.active !== null) draft.state.active = null
 
   for (;;) {
     const phase = draft.state.phase

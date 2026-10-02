@@ -2,8 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { parseTask, serializeTask } from '../../src/core/frontmatter.ts'
-import { inScope, isTooBroad, matchesPattern, relativeTo } from '../../src/core/glob.ts'
-import { InputError, addTask, completeTask, judgeEdit, setPhase, updateTask } from '../../src/core/ops.ts'
+import { InputError, addTask, completeTask, setPhase, updateTask } from '../../src/core/ops.ts'
 import { DEFAULT_POLICY, admits, bugPriority, deferUntil, resolvePolicy } from '../../src/core/policy.ts'
 import { KINDS, PHASES, PRIORITIES, ordinal } from '../../src/core/types.ts'
 import type { Kind, Phase, Priority } from '../../src/core/types.ts'
@@ -95,13 +94,12 @@ describe('バグの優先度の表', () => {
 describe('pm_add / pm_update の検証', () => {
   const base = { title: 'x', kind: 'feature', priority: 'max', scope_paths: ['src/x/**'], acceptance: ['ok'] }
 
-  test('必須項目と範囲の広さを確かめる', () => {
-    assert.throws(() => addTask(snapshot([]), { ...base, scope_paths: ['**'] }, NOW), InputError)
-    assert.throws(() => addTask(snapshot([]), { ...base, scope_paths: [] }, NOW), InputError)
+  test('必須項目を確かめる（scope_paths は任意）', () => {
+    assert.doesNotThrow(() => addTask(snapshot([]), { ...base, scope_paths: undefined }, NOW))
     assert.throws(() => addTask(snapshot([]), { ...base, acceptance: [] }, NOW), InputError)
+    assert.throws(() => addTask(snapshot([]), { ...base, title: '' }, NOW), InputError)
     assert.throws(() => addTask(snapshot([]), { ...base, priority: 'urgent' }, NOW), InputError)
     assert.throws(() => addTask(snapshot([]), { ...base, depends_on: ['T-0099'] }, NOW), InputError)
-    assert.doesNotThrow(() => addTask(snapshot([]), { ...base, kind: 'release', scope_paths: [] }, NOW))
   })
 
   test('依存の循環は拒否する', () => {
@@ -150,73 +148,28 @@ describe('pm_complete', () => {
     { item: '空でも出る', met: true },
   ]
 
-  test('完了条件と範囲を満たせば done にして active を外す', () => {
-    const out = completeTask(active(), { taskId: 'T-0001', status: 'done', changedFiles: ['src/export/csv.ts'], acceptance: met }, { files: ['.pm/state.json', 'src/export/a.ts'], source: 'git' }, NOW)
+  test('完了条件をすべて満たせば done にして active を外す', () => {
+    const out = completeTask(active(), { taskId: 'T-0001', status: 'done', changedFiles: ['src/export/csv.ts', 'src/ui/theme.ts'], acceptance: met }, NOW)
     assert.equal(out.result.kind, 'completed')
     assert.equal(out.result.task.status, 'done')
     assert.equal(out.state.active, null)
-    assert.deepEqual(out.result.kind === 'completed' && out.result.files, ['src/export/a.ts', 'src/export/csv.ts'])
+    assert.deepEqual(out.events.at(-1)?.files, ['src/export/csv.ts', 'src/ui/theme.ts'])
   })
 
-  test('AC-8: 範囲外の変更を検出したら scope.violation を記録して完了にしない', () => {
-    const out = completeTask(active(), { taskId: 'T-0001', status: 'done', acceptance: met }, { files: ['src/export/csv.ts', 'src/ui/theme.ts'], source: 'git' }, NOW)
-    assert.equal(out.result.kind, 'scope_violation')
-    assert.equal(out.result.task.status, 'in_progress')
-    assert.deepEqual(out.result.task.scope_violation, ['src/ui/theme.ts'])
-    assert.ok(out.events.some(e => e.event === 'scope.violation'))
-    assert.equal(out.state.active, 'T-0001')
-  })
-
-  test('満たしていない完了条件があれば完了にしない', () => {
-    const out = completeTask(active(), { taskId: 'T-0001', status: 'done', acceptance: [{ item: 'CSV が出る', met: true }] }, { files: null, source: 'none' }, NOW)
+  test('満たしていない完了条件があれば、まだ完了にしない', () => {
+    const out = completeTask(active(), { taskId: 'T-0001', status: 'done', acceptance: [{ item: 'CSV が出る', met: true }] }, NOW)
     assert.equal(out.result.kind, 'incomplete')
     assert.deepEqual(out.result.kind === 'incomplete' && out.result.unmet, ['空でも出る'])
   })
 
   test('2回続けて失敗したらループを止める', () => {
-    const first = completeTask(active(), { taskId: 'T-0001', status: 'failed', notes: 'テストが通らない' }, { files: null, source: 'none' }, NOW)
+    const first = completeTask(active(), { taskId: 'T-0001', status: 'failed', notes: 'テストが通らない' }, NOW)
     assert.equal(first.result.kind === 'failed' && first.result.stop, false)
     assert.equal(first.result.task.status, 'todo')
     const again = active()
     again.tasks[0] = { ...(again.tasks[0] as (typeof again.tasks)[number]), failures: 1 }
-    const second = completeTask(again, { taskId: 'T-0001', status: 'failed' }, { files: null, source: 'none' }, NOW)
+    const second = completeTask(again, { taskId: 'T-0001', status: 'failed' }, NOW)
     assert.equal(second.result.kind === 'failed' && second.result.stop, true)
-  })
-})
-
-describe('ガードの判定', () => {
-  const active = { id: 'T-0012', paths: ['src/export/**', 'tests/export/**'] }
-  test('範囲内は許可、範囲外・.pm/・作業中なしは違反、ルートの外は対象外', () => {
-    assert.equal(judgeEdit({ path: 'src/export/csv.ts', active }).violation, false)
-    const out = judgeEdit({ path: 'src/ui/theme.ts', active })
-    assert.equal(out.violation && out.message, 'LightPM: T-0012 の範囲外です（src/ui/theme.ts）。直さずに mcp__lightpm__pm_add で登録し、T-0012 の作業を続けてください。範囲: src/export/**, tests/export/**')
-    assert.equal(judgeEdit({ path: '.pm/state.json', active }).violation, true)
-    assert.equal(judgeEdit({ path: 'src/a.ts', active: null }).violation, true)
-    assert.equal(judgeEdit({ path: null, active: null }).violation, false)
-  })
-})
-
-describe('glob', () => {
-  test('照合', () => {
-    assert.ok(matchesPattern('src/export/a/b.ts', 'src/export/**'))
-    assert.ok(matchesPattern('src/export', 'src/export/**'))
-    assert.ok(!matchesPattern('src/exporter/a.ts', 'src/export/**'))
-    assert.ok(matchesPattern('src/a.test.ts', 'src/*.test.ts'))
-    assert.ok(!matchesPattern('src/x/a.test.ts', 'src/*.test.ts'))
-    assert.ok(matchesPattern('src/x/a.test.ts', 'src/**/*.test.ts'))
-    assert.ok(matchesPattern('src/a.test.ts', 'src/**/*.test.ts'))
-    assert.ok(matchesPattern('README.md', '{README,CHANGELOG}.md'))
-    assert.ok(matchesPattern('docs/a/b.md', 'docs'), 'ワイルドカードなしはディレクトリ配下にも一致')
-    assert.ok(inScope('lib/x.ts', ['src/**', 'lib/x.ts']))
-  })
-  test('広すぎる指定', () => {
-    for (const p of ['**', '**/*', '*', '.', './']) assert.ok(isTooBroad(p), p)
-    assert.ok(!isTooBroad('src/**'))
-  })
-  test('相対パス', () => {
-    assert.equal(relativeTo('/repo', '/repo/src/a.ts'), 'src/a.ts')
-    assert.equal(relativeTo('/repo/', '/other/a.ts'), null)
-    assert.equal(relativeTo('/repo', '/repository/a.ts'), null)
   })
 })
 
@@ -241,6 +194,12 @@ describe('タスクファイル', () => {
       notes: 'true',
       body: '主要シナリオの最後のステップ。\n\n- 手順',
     })
+    assert.deepEqual(parseTask(serializeTask(t)), t)
+  })
+
+  test('scope.paths のないタスクも書き出して読み直せる', () => {
+    const t = task({ id: 'T-0002', scope: { paths: [] } })
+    assert.doesNotMatch(serializeTask(t), /scope:/)
     assert.deepEqual(parseTask(serializeTask(t)), t)
   })
 

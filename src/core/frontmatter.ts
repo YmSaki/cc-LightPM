@@ -211,8 +211,6 @@ export const toTask = (data: { [key: string]: unknown }, body: string): Task => 
     }
   }
   if (typeof data.failures === 'number' && data.failures > 0) task.failures = data.failures
-  const violation = asStrings(data.scope_violation, 'scope_violation')
-  if (violation.length > 0) task.scope_violation = violation
   const notes = asString(data.notes)
   if (notes) task.notes = notes
   return task
@@ -256,8 +254,10 @@ export const serializeTask = (task: Task): string => {
   out.push(`priority: ${task.priority}`)
   out.push(`status: ${task.status}`)
   if (task.depends_on.length > 0) out.push(`depends_on: ${flow(task.depends_on, false)}`)
-  out.push('scope:')
-  out.push(`  paths: ${flow(task.scope.paths, true)}`)
+  if (task.scope.paths.length > 0) {
+    out.push('scope:')
+    out.push(`  paths: ${flow(task.scope.paths, true)}`)
+  }
   out.push(...block('acceptance', task.acceptance))
   if (task.non_goals.length > 0) out.push(...block('non_goals', task.non_goals))
   if (task.estimate) out.push(`estimate: ${task.estimate}`)
@@ -270,9 +270,6 @@ export const serializeTask = (task: Task): string => {
     out.push(`  reason: ${task.defer.reason}`)
   }
   if (task.failures) out.push(`failures: ${task.failures}`)
-  if (task.scope_violation && task.scope_violation.length > 0) {
-    out.push(...block('scope_violation', task.scope_violation))
-  }
   if (task.notes) out.push(`notes: ${scalar(task.notes)}`)
   out.push(`created: ${scalar(task.created)}`)
   out.push(`updated: ${scalar(task.updated)}`)

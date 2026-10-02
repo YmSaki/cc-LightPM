@@ -2,7 +2,7 @@
 
 LightPM は、Claude Code に「次にやる作業」を**規則で1件だけ**選ばせるプラグイン（スキル＋サブエージェント＋モッド）です。
 
-AI エージェントは、目の前の問題をその場で直し始めがちです。そのため、基本機能（`max`）が未完成でも軽微なバグ（`mid` 以下）に手を付け、重要な実装が後回しになります。LightPM は、リリースフェーズ（Alpha → Beta → RC → GM）と優先度（`max` / `xhigh` / `high` / `mid` / `low` / `xlow`）から着手順を決めます。範囲外で見つけた問題はその場で直させず、登録して後回しにします。
+AI エージェントは、目の前の問題をその場で直し始めがちです。そのため、基本機能（`max`）が未完成でも軽微なバグ（`mid` 以下）に手を付け、重要な実装が後回しになります。LightPM は、リリースフェーズ（Alpha → Beta → RC → GM）と優先度（`max` / `xhigh` / `high` / `mid` / `low` / `xlow`）から着手順を決めます。作業中に気づいた別の作業は登録しておけば、優先度順に回ってきます。
 
 - **選択は決定的**: 同じ `.pm/` からは、常に同じタスクが選ばれます。LLM は分類（種別・優先度）にだけ使います。
 - **人間の承認ゲートなし**: 分解 → 優先付け → 実装 → 検証を自走します。判断の理由は監査ログに残ります。
@@ -40,13 +40,13 @@ claude --plugin-dir /path/to/cc-lightpm
 /lightpm:pm-run
 ```
 
-ループを回します。`pm_next` が次のタスクを1件選び、サブエージェント `pm-implementer` が実装します。`pm_complete` が完了条件と変更範囲（`git diff`）を検証し、範囲外で見つかった問題は登録だけして次へ進みます。「待ち」「完了」「同じタスクの2回連続の失敗」のいずれかで止まります。`/lightpm:pm-run 3` のように、上限の件数も指定できます。
+ループを回します。`pm_next` が次のタスクを1件選び、サブエージェント `pm-implementer` が実装します。`pm_complete` が完了条件を確かめ、気づいた別の作業は登録して次へ進みます。「待ち」「完了」「同じタスクの2回連続の失敗」のいずれかで止まります。`/lightpm:pm-run 3` のように、上限の件数も指定できます。
 
 ```text
 /lightpm:pm-triage ログイン画面で長いメールアドレスが切れる
 ```
 
-作業中に気づいた問題を、ルーブリックで分類して登録します（直しはしません）。
+作業中に気づいた問題や新しい依頼を、ルーブリックで分類して登録します。
 
 ```text
 /pm              状態（フェーズ、作業中、todo、後回し、抜ける条件）
@@ -69,7 +69,6 @@ LightPM Alpha · ▶ T-0003 CLI エントリと add を実装する [max] · tod
 | `/pm list [status]` | タスクの一覧 |
 | `/pm why <id>` | 選択・後回し・再分類の履歴 |
 | `/pm phase set <phase> [理由]` | フェーズの手動変更（`phase.set` として記録） |
-| `/pm enforce <off\|inform\|warn\|block>` | ガードの強制レベル |
 | `/pm policy` | 現在のフェーズポリシーの表 |
 | `/pm refresh` | `.pm/` を読み直して帯を更新 |
 
@@ -125,35 +124,20 @@ LightPM Alpha · ▶ T-0003 CLI エントリと add を実装する [max] · tod
 | --- | --- | --- |
 | スキル | `pm-plan` | 目的を分解し、分類して登録する |
 | スキル | `pm-run` | `pm_next` から完了までのループを回す |
-| スキル | `pm-triage` | 発見した問題を分類して登録する |
-| サブエージェント | `lightpm:pm-implementer` | 1タスクを範囲内で実装し、JSON で報告する |
+| スキル | `pm-triage` | 気づいた作業を分類して登録する |
+| サブエージェント | `lightpm:pm-implementer` | 1タスクを実装し、JSON で報告する |
 | ツール | `mcp__lightpm__pm_status` / `pm_next` / `pm_add` / `pm_update` / `pm_complete` | Claude が呼ぶ操作（モッドが登録） |
 | コマンド | `/pm` | 人が使う |
-| モッド | `hooks/lightpm.tsx` | ツールとコマンドの処理、プロンプトへの文脈の追加、帯、編集のガード、監査ログ |
+| モッド | `hooks/lightpm.tsx` | ツールとコマンドの処理、プロンプトへの「今やること」の追加、帯、監査ログ |
 
-モッドが使う API は `$.fs`（`.pm/` の読み書きのみ）、`$.process.run`（`git` のみ）、`$.state`、`$.ui`、`$.tool`、`$.command`、`$.clock`、`$.session.root` です。ネットワークも LLM も呼ばないので、プランや API キーを消費しません。`claude plugin validate .claude-plugin/plugin.json` で一覧を確認できます。
-
-## ガード
-
-`Edit` / `Write` / `NotebookEdit` の直前に、編集先が作業中のタスクの `scope.paths` に収まるかを確かめます。サブエージェントの編集にも効きます。
-
-| レベル | 範囲外の編集 |
-| --- | --- |
-| `off` | 何もしない |
-| `inform` | 通す。監査ログに記録し、帯に件数を出す |
-| `warn`（既定） | 通す。トーストを出し、Claude にも注意を返し、監査ログに記録する |
-| `block` | 拒否する。理由は「`pm_add` で登録して作業を続けて」という文面で Claude に返す |
-
-`.pm/` 内の編集と、作業中のタスクがない状態での編集も違反として扱います。プロジェクトの外のファイルは対象外です。Bash での書き換え（`sed -i` など）は見えないため、`pm_complete` の差分検証が最後の砦になります。
-
-範囲の検査は、うっかりした取り違えを防ぐための安全網です。意図的な回避は想定していません。
+モッドが使う API は `$.fs`（`.pm/` の読み書きのみ）、`$.state`、`$.ui`、`$.tool`、`$.command`、`$.clock`、`$.session.root` です。ネットワークも LLM も呼ばないので、プランや API キーを消費しません。`claude plugin validate .claude-plugin/plugin.json` で一覧を確認できます。
 
 ## `.pm/` の形式
 
 ```text
 .pm/
-├── config.json      { "schema": 1, "enforcement": "warn", "scopeVerify": true, "policy": {} }
-├── state.json       { "schema": 1, "phase": "alpha", "nextId": 6, "active": null, "baseline": null }
+├── config.json      { "schema": 1, "policy": {} }
+├── state.json       { "schema": 1, "phase": "alpha", "nextId": 6, "active": null }
 ├── tasks/
 │   └── T-0001.md    1タスク1ファイル（YAML frontmatter + 本文）
 └── log/
@@ -187,7 +171,7 @@ updated: 2026-10-02T00:18:04.101Z
 
 ### モッドなしで使う
 
-managed settings などでモッドが無効な環境でも、スキルとサブエージェントは動きます。ただし `pm_*` ツールがないため、Claude が上の形式で `.pm/tasks/` を手で編集することになります。この場合、選択の決定性・ガード・帯は働きません。
+managed settings などでモッドが無効な環境でも、スキルとサブエージェントは動きます。ただし `pm_*` ツールがないため、Claude が上の形式で `.pm/tasks/` を手で編集することになります。この場合、次のタスクの選択は規則どおりにならず、帯も出ません。
 
 ## 開発
 
@@ -199,23 +183,23 @@ npm run validate    # claude plugin validate .（マーケットプレイスと�
 ```
 
 ```text
-src/core/   純粋関数（型、ポリシー、frontmatter、glob、選択、登録・更新・完了、ガード判定、文面）
+src/core/   純粋関数（型、ポリシー、frontmatter、選択、登録・更新・完了、文面）
 src/io/     .pm/ の読み書き（.pm/ の外へは書かない、書き込み後に読み戻して検証）
 hooks/      モッドの入口
 skills/ agents/   スキルとサブエージェント
 tests/core/*.spec.ts   コアの単体テスト（表駆動、並べ替えの性質テスト、性能）
-tests/mod/*.test.ts    モッドのテスト（$.fs と git をメモリ上で置き換え）
+tests/mod/*.test.ts    モッドのテスト（$.fs をメモリ上で置き換え）
 ```
 
 型チェック（`npm run typecheck`）には、Claude Code がモッドを読み込んだときに書き出す `.claude-plugin/types/` が必要です。先に一度 `claude --plugin-dir .` で起動してください。
 
-仕様書 v0.1 の受け入れ基準のうち、AC-1〜AC-10 はテストで確かめています。
+仕様書 v0.1 の受け入れ基準のうち、AC-1〜6、AC-9、AC-10 をテストで確かめています（AC-7・AC-8 はガードを外したため対象外）。
 
 ## 仕様書 v0.1 の未検証事項の結果と、実装上の判断
 
 | ID | 結果 |
 | --- | --- |
-| OQ-1 | `tool.call` はサブエージェントの `Edit` / `Write` にも発火し、`agentId` が付く（実機で確認。監査ログの `actor` は `subagent:<id>`） |
+| OQ-1 | `tool.call` はサブエージェントの `Edit` / `Write` にも発火し、`agentId` が付く（実機で確認）。ただし v0.1 ではガード自体を外した |
 | OQ-2 | フックのモジュールは他のファイルを `import` できる（`.ts` 拡張子付き）。バンドルは不要 |
 | OQ-3 | `$.fs.write` は親ディレクトリを作る。`mkdir` は不要 |
 | OQ-4 | サブエージェントは `agents/pm-implementer.md` で提供（`lightpm:pm-implementer`） |
@@ -223,11 +207,11 @@ tests/mod/*.test.ts    モッドのテスト（$.fs と git をメモリ上で�
 
 仕様書から変えた点・補った点:
 
-- **読み込みは毎回ディスクから**: `$.state` には帯とガード用の要約だけを置きます。ツールのたびに `.pm/` を読み直すので、手編集や `git pull` の後も `/pm refresh` は基本的に不要です。
+- **ガードと範囲の検証は入れていません**: LightPM は「何を・どの順でやるか」を示す道具に絞りました。編集先の監視（`Edit` / `Write` の警告・拒否）や、完了時の `git diff` による範囲チェックはありません。「範囲外は直さない」という禁止の代わりに、「気づいた作業は登録すれば優先度順に回ってくる」と伝えます。`scope.paths` は任意で、主に触るファイルの目安です。
+- **読み込みは毎回ディスクから**: `$.state` には帯とプロンプト用の要約だけを置きます。ツールのたびに `.pm/` を読み直すので、手編集や `git pull` の後も `/pm refresh` は基本的に不要です。
 - **後回しの見直しは毎回**: 昇格時だけでなく `pm_next` のたびに見直します。後回しのタスクが、後から `max` のタスクの前提になった場合に、着手できずに止まるのを防ぐためです。
 - **`dropped` の依存は解決済みとして扱います。**
 - **バグの優先度は表が優先**: `impacts` が既存タスクなら、指定された `priority` より表の値を使います。
-- **完了時の差分検証の基準点**: タスクを選んだ時点で `git stash create` を取り、そこからの変更だけを検証します。前のタスクの未コミットの変更を数えないためです。
 - **`pm_complete` は `discovered` を自動登録しません**: 分類に LLM の判断が要るためで、代わりに `pm_add` での登録を促す文を返します。
 - **`/pm add` はありません**: 登録は `/lightpm:pm-triage` か `pm_add` で行います。
 - **ID の並行採番**: モッド内で書き込みを直列化しているので、並行した `pm_add` でも ID は重複しません。
@@ -235,8 +219,9 @@ tests/mod/*.test.ts    モッドのテスト（$.fs と git をメモリ上で�
 ### まだないもの
 
 - CI でのモッドの検証（`claude plugin validate --strict` と `claude plugin test` を、最小対応版・最新版の両方で）。今の CI はコアの単体テストだけを回す
+- 取り違えが実際に問題になった場合のガード（必要になったら、範囲の警告から足す）
 - モッドなしでも決定的に選択するための Node の入口
-- 効果の計測（優先度の逆転数、範囲外編集率、`max` の完了までの時間）
+- 効果の計測（優先度の逆転数、`max` の完了までの時間）
 - 複数人・複数リポジトリでの同期（v1 の対象外）
 
 ## ライセンス

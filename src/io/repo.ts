@@ -1,7 +1,7 @@
 // .pm/ の読み書き。$.fs と同じ形の Fs を受け取り、.pm/ の外へは書かない。
 
 import { parseTask, serializeTask } from '../core/frontmatter.ts'
-import { ENFORCEMENTS, PHASES, SCHEMA, defaultConfig, defaultState } from '../core/types.ts'
+import { PHASES, SCHEMA, defaultConfig, defaultState } from '../core/types.ts'
 import type { Config, LogEvent, Phase, Snapshot, State, Task } from '../core/types.ts'
 
 export type Fs = {
@@ -78,19 +78,9 @@ export class Repo {
       if (typeof rawState.phase === 'string' && (PHASES as readonly string[]).includes(rawState.phase)) state.phase = rawState.phase as Phase
       if (typeof rawState.nextId === 'number' && rawState.nextId > 0) state.nextId = Math.floor(rawState.nextId)
       if (typeof rawState.active === 'string') state.active = rawState.active
-      const b = rawState.baseline as { ref?: unknown; untracked?: unknown } | null | undefined
-      if (b && typeof b.ref === 'string' && Array.isArray(b.untracked)) {
-        state.baseline = { ref: b.ref, untracked: b.untracked.filter((u): u is string => typeof u === 'string') }
-      }
     }
     const config = defaultConfig()
-    if (rawConfig) {
-      if (typeof rawConfig.enforcement === 'string' && (ENFORCEMENTS as readonly string[]).includes(rawConfig.enforcement)) {
-        config.enforcement = rawConfig.enforcement as Config['enforcement']
-      }
-      if (typeof rawConfig.scopeVerify === 'boolean') config.scopeVerify = rawConfig.scopeVerify
-      if (rawConfig.policy && typeof rawConfig.policy === 'object') config.policy = rawConfig.policy as Config['policy']
-    }
+    if (rawConfig?.policy && typeof rawConfig.policy === 'object') config.policy = rawConfig.policy as Config['policy']
 
     const tasks: Task[] = []
     const dir = this.path('.pm/tasks')
@@ -124,12 +114,8 @@ export class Repo {
   }
 
   async saveState(state: State): Promise<void> {
-    const out = { schema: SCHEMA, phase: state.phase, nextId: state.nextId, active: state.active, baseline: state.baseline ?? null }
+    const out = { schema: SCHEMA, phase: state.phase, nextId: state.nextId, active: state.active }
     await this.write('.pm/state.json', `${JSON.stringify(out, null, 2)}\n`)
-  }
-
-  async saveConfig(config: Config): Promise<void> {
-    await this.write('.pm/config.json', `${JSON.stringify(config, null, 2)}\n`)
   }
 
   /** 監査ログに追記する。$.fs に追記がないため、読んで末尾に足して書き戻す。 */

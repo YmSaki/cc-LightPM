@@ -24,9 +24,6 @@ export type Severity = (typeof SEVERITIES)[number]
 export const ESTIMATES = ['S', 'M', 'L'] as const
 export type Estimate = (typeof ESTIMATES)[number]
 
-export const ENFORCEMENTS = ['off', 'inform', 'warn', 'block'] as const
-export type Enforcement = (typeof ENFORCEMENTS)[number]
-
 export const SCHEMA = 1
 
 export type Task = {
@@ -37,6 +34,7 @@ export type Task = {
   priority: Priority
   status: Status
   depends_on: string[]
+  /** 主に触るファイルの目安（実装者への手がかり）。 */
   scope: { paths: string[] }
   acceptance: string[]
   non_goals: string[]
@@ -47,8 +45,6 @@ export type Task = {
   defer?: { until: DeferUntil; reason: DeferReason }
   /** 連続した失敗の回数。完了で 0 に戻る。 */
   failures?: number
-  /** pm_complete の差分検証で見つかった範囲外のファイル。 */
-  scope_violation?: string[]
   /** 直近の失敗や更新のメモ。 */
   notes?: string
   created: string
@@ -57,15 +53,11 @@ export type Task = {
   body: string
 }
 
-/** 作業開始時点の git の状態。完了時の差分検証に使う。 */
-export type Baseline = { ref: string; untracked: string[] }
-
 export type State = {
   schema: number
   phase: Phase
   nextId: number
   active: string | null
-  baseline?: Baseline | null
 }
 
 /** フェーズ × 種別の着手条件。min が null なら種別ごと不可。blocker ならリリース阻害は常に可。 */
@@ -75,8 +67,6 @@ export type PolicyOverride = Partial<Record<Phase, Partial<Record<Kind, Priority
 
 export type Config = {
   schema: number
-  enforcement: Enforcement
-  scopeVerify: boolean
   policy: PolicyOverride
 }
 
@@ -104,12 +94,9 @@ export const defaultState = (phase: Phase = 'alpha'): State => ({
   phase,
   nextId: 1,
   active: null,
-  baseline: null,
 })
 
 export const defaultConfig = (): Config => ({
   schema: SCHEMA,
-  enforcement: 'warn',
-  scopeVerify: true,
   policy: {},
 })

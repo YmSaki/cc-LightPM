@@ -1,4 +1,4 @@
-// LightPM のモッド。ツールとコマンドを登録し、.pm/ を読み書きし、帯とガードを出す。
+// LightPM のモッド。ツールとコマンドを登録し、.pm/ を読み書きし、帯を出す。
 // 判断はすべて src/core の純粋関数が行い、ここは入出力だけを受け持つ。
 
 import { atom, read, update } from 'claude-code'
@@ -6,12 +6,10 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { bandText, contextFor, formatComplete, formatList, formatNext, formatPolicy, formatStatus, formatWhy, summarize } from '../src/core/format.ts'
 import type { Summary } from '../src/core/format.ts'
-import { relativeTo } from '../src/core/glob.ts'
-import { InputError, addTask, completeTask, judgeEdit, setPhase, updateTask } from '../src/core/ops.ts'
-import type { Detected } from '../src/core/ops.ts'
+import { InputError, addTask, completeTask, setPhase, updateTask } from '../src/core/ops.ts'
 import { nextTask } from '../src/core/select.ts'
-import { ENFORCEMENTS, PHASES } from '../src/core/types.ts'
-import type { Baseline, Phase, Snapshot } from '../src/core/types.ts'
+import { PHASES } from '../src/core/types.ts'
+import type { Phase } from '../src/core/types.ts'
 import { Repo } from '../src/io/repo.ts'
 import type { Loaded } from '../src/io/repo.ts'
 import type { LightpmSummary } from '../types'
@@ -39,9 +37,9 @@ const TASK_FIELDS = {
   impacts: { type: 'string', description: 'bug で必須。影響を受けるタスク ID（T-0003）か機能名' },
   impact_priority: { ...PRIORITY, description: 'impacts が機能名のとき、その機能の優先度（バグの表に使う）' },
   depends_on: { ...STRINGS, description: '実装上の前提になるタスク ID。「優先度が高いから先に」は依存ではない' },
-  scope_paths: { ...STRINGS, description: '編集してよいパスの glob（ルートからの相対）。完了に必要な最小限。テストも含める。release 以外は必須' },
+  scope_paths: { ...STRINGS, description: '主に触るファイルやディレクトリの目安（ルートからの相対、glob 可）。実装者への手がかり' },
   acceptance: { ...STRINGS, description: '完了条件。1つ以上' },
-  non_goals: { ...STRINGS, description: 'やらないこと' },
+  non_goals: { ...STRINGS, description: '紛らわしいときだけ、このタスクに含めないもの' },
   estimate: { type: 'string', enum: ['S', 'M', 'L'] },
   release_blocker: { type: 'boolean', description: 'リリースを阻害するバグか' },
   body: { type: 'string', description: '背景や再現手順（自由記述）' },
@@ -63,7 +61,7 @@ const TOOLS = [
   {
     name: 'pm_add',
     description:
-      'LightPM: タスクを1件登録する。作業中に見つけた範囲外の問題は、その場で直さずにこれで登録する。現在のフェーズで着手できないものは自動で後回し（deferred）になる。.pm/ がなければ作る。',
+      'LightPM: タスクを1件登録する。作業中に気づいた別の作業もこれで登録すれば、優先度順に回ってくる。今のフェーズで着手しないものは自動で後回し（deferred）になる。.pm/ がなければ作る。',
     inputSchema: { type: 'object', properties: TASK_FIELDS, required: ['title', 'kind', 'acceptance'] },
   },
   {
@@ -85,7 +83,7 @@ const TOOLS = [
   {
     name: 'pm_complete',
     description:
-      'LightPM: pm-implementer の報告を渡してタスクを完了（または失敗）にする。完了条件と、変更ファイルが scope.paths に収まるか（git diff）を検証し、満たさなければ完了にしない。',
+      'LightPM: pm-implementer の報告を渡してタスクを完了（または失敗）にする。完了条件がすべて満たされていれば完了になる。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -96,7 +94,7 @@ const TOOLS = [
           type: 'array',
           items: { type: 'object', properties: { item: { type: 'string' }, met: { type: 'boolean' } }, required: ['item', 'met'] },
         },
-        discovered: { type: 'array', items: { type: 'object' }, description: '範囲外で見つけた問題。ここでは登録しないので、別に pm_add で登録する' },
+        discovered: { type: 'array', items: { type: 'object' }, description: '作業中に気づいた別の作業。ここでは登録しないので、別に pm_add で登録する' },
         notes: { type: 'string', description: 'failed のときは原因' },
       },
       required: ['taskId', 'status'],
@@ -135,8 +133,7 @@ const refresh = async ($: $, repo: Repo, loaded?: Loaded): Promise<Summary | nul
     return null
   }
   const snapshot = loaded ?? (await repo.load())
-  const previous = (await $.state.get(SUMMARY)).value
-  const summary = summarize(snapshot, repo.root, previous?.violations ?? 0, snapshot.errors.length)
+  const summary = summarize(snapshot, snapshot.errors.length)
   await update($, summaryAtom, () => summary as LightpmSummary)
   return summary
 }
@@ -164,45 +161,6 @@ const answer = async (work: () => Promise<string>): Promise<{ result: string } |
   }
 }
 
-// ---- git（完了時の差分検証） ----
-
-const git = ($: $, root: string, args: string[]) =>
-  $.process.run(['git', '-c', 'core.quotepath=false', ...args], { cwd: root, timeoutMs: 15000 })
-
-const nul = (out: string): string[] => out.split('\0').filter(s => s !== '')
-
-const captureBaseline = async ($: $, root: string): Promise<Baseline | null> => {
-  try {
-    const inside = await git($, root, ['rev-parse', '--is-inside-work-tree'])
-    if (inside.exitCode !== 0) return null
-    const stash = await git($, root, ['stash', 'create'])
-    let ref = stash.exitCode === 0 ? stash.stdout.trim() : ''
-    if (ref === '') {
-      const head = await git($, root, ['rev-parse', 'HEAD'])
-      if (head.exitCode !== 0) return null
-      ref = head.stdout.trim()
-    }
-    const untracked = await git($, root, ['ls-files', '-z', '--others', '--exclude-standard'])
-    return { ref, untracked: untracked.exitCode === 0 ? nul(untracked.stdout) : [] }
-  } catch {
-    return null
-  }
-}
-
-const detectChanges = async ($: $, root: string, baseline: Baseline | null | undefined): Promise<Detected> => {
-  if (!baseline) return { files: null, source: 'none' }
-  try {
-    const diff = await git($, root, ['diff', '--name-only', '-z', '--no-renames', '--relative', baseline.ref])
-    if (diff.exitCode !== 0) return { files: null, source: 'none', note: diff.stderr.trim() }
-    const untracked = await git($, root, ['ls-files', '-z', '--others', '--exclude-standard'])
-    const before = new Set(baseline.untracked)
-    const added = untracked.exitCode === 0 ? nul(untracked.stdout).filter(f => !before.has(f)) : []
-    return { files: [...nul(diff.stdout), ...added], source: 'git' }
-  } catch (e) {
-    return { files: null, source: 'none', note: String(e) }
-  }
-}
-
 // ---- /pm ----
 
 const HELP = [
@@ -212,7 +170,6 @@ const HELP = [
   '/pm list [status]       タスクの一覧（todo / in_progress / deferred / done / dropped）',
   '/pm why <id>            そのタスクが選ばれた・後回しになった理由',
   '/pm phase [set <phase> [理由]]  フェーズの表示・手動変更（監査ログに残る）',
-  '/pm enforce <level>     ガードの強制レベル（off / inform / warn / block）',
   '/pm policy              フェーズポリシーの表',
   '/pm refresh             .pm/ を読み直して帯を更新',
 ].join('\n')
@@ -261,16 +218,6 @@ const runCommand = async ($: $, args: string): Promise<string> => {
         return `フェーズを ${outcome.result.from} → ${outcome.result.to} に変えました（監査ログ: phase.set）。`
       }).catch(e => (e instanceof InputError ? e.message : String(e)))
     }
-    case 'enforce': {
-      const level = rest[0]
-      if (!level || !(ENFORCEMENTS as readonly string[]).includes(level)) return `強制レベルは ${ENFORCEMENTS.join(' / ')} のいずれかです。`
-      return mutate($, async (r, loaded, at) => {
-        const from = loaded.config.enforcement
-        await r.saveConfig({ ...loaded.config, enforcement: level as Snapshot['config']['enforcement'] })
-        await r.appendLog([{ event: 'config.changed', actor: 'user', key: 'enforcement', from, to: level }], at)
-        return `ガードの強制レベルを ${from} → ${level} にしました。`
-      })
-    }
     case 'policy': {
       const loaded = await repo.load()
       return `着手できる下限（実効優先度）:\n${formatPolicy(loaded.config.policy)}`
@@ -285,39 +232,12 @@ const runCommand = async ($: $, args: string): Promise<string> => {
   }
 }
 
-// ---- ガード ----
-
-const guard = async ($: $, e: { agentId?: string }, path: string): Promise<{ deny: string } | { warn: string } | null> => {
-  const summary = (await $.state.get(SUMMARY)).value
-  if (!summary || summary.enforcement === 'off') return null
-  const rel = relativeTo(summary.root, path)
-  const verdict = judgeEdit({ path: rel, active: summary.active ? { id: summary.active.id, paths: summary.active.paths } : null })
-  if (!verdict.violation) return null
-  const level = summary.enforcement
-  const result = level === 'block' ? 'deny' : 'allow'
-  await exclusive(async () => {
-    const repo = await repoOf($)
-    if (!(await repo.exists())) return
-    await repo.appendLog(
-      [{ event: 'guard.violation', actor: actorOf(e), taskId: verdict.taskId, path: rel, kind: verdict.kind, level, result }],
-      await nowIso($),
-    )
-  })
-  await update($, summaryAtom, s => (s ? { ...s, violations: s.violations + 1 } : s))
-  if (level === 'block') return { deny: verdict.message }
-  if (level === 'warn') {
-    $.ui.toast(verdict.message, { timeoutMs: 6000 })
-    return { warn: verdict.message }
-  }
-  return null
-}
-
 // ---- 登録 ----
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     for (const tool of TOOLS) await $.tool.register(tool)
-    await $.command.register({ name: 'pm', description: 'LightPM: フェーズとタスクの状態（/pm help）', argumentHint: '[status|init|next|list|why|phase|enforce|policy|refresh]' })
+    await $.command.register({ name: 'pm', description: 'LightPM: フェーズとタスクの状態（/pm help）', argumentHint: '[status|init|next|list|why|phase|policy|refresh]' })
     try {
       await refresh($, await repoOf($))
     } catch (err) {
@@ -352,9 +272,6 @@ export const register: Register = on => {
       if (!(await repo.exists())) return NOT_INITIALIZED
       return mutate($, async (r, loaded, now) => {
         const outcome = nextTask(loaded, now)
-        if (outcome.result.kind === 'task' && !outcome.result.resumed) {
-          outcome.state.baseline = await captureBaseline($, r.root)
-        }
         await r.persist(outcome, now)
         return formatNext(outcome.result) + errorNote(loaded)
       })
@@ -396,39 +313,15 @@ export const register: Register = on => {
       const repo = await repoOf($)
       if (!(await repo.exists())) return NOT_INITIALIZED
       return mutate($, async (r, loaded, now) => {
-        const detected = loaded.config.scopeVerify ? await detectChanges($, r.root, loaded.state.baseline) : { files: null, source: 'none' as const }
-        const outcome = completeTask(loaded, e, detected, now, actorOf(e))
+        const outcome = completeTask(loaded, e, now, actorOf(e))
         await r.persist(outcome, now)
         let text = formatComplete(outcome.result)
         const discovered = Array.isArray(e.discovered) ? e.discovered.length : 0
-        if (discovered > 0) text += `\n\n報告に discovered が ${discovered} 件あります。直さずに pm_add で登録してください（pm-triage のルーブリックで分類）。`
+        if (discovered > 0) text += `\n\n報告に discovered が ${discovered} 件あります。pm-triage のルーブリックで分類して pm_add で登録してください。`
         return text
       })
     }),
   )
-
-  // ---- ガード：Edit / Write / NotebookEdit ----
-
-  on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
-    const verdict = await guard($, e, e.file_path)
-    if (verdict && 'deny' in verdict) return { deny: verdict.deny }
-    const ran = await next(e)
-    return verdict && ran.deny === undefined ? { ...ran, context: [...(ran.context ?? []), verdict.warn] } : ran
-  })
-
-  on('tool.call', { tool: 'Write' }, async ($, e, next) => {
-    const verdict = await guard($, e, e.file_path)
-    if (verdict && 'deny' in verdict) return { deny: verdict.deny }
-    const ran = await next(e)
-    return verdict && ran.deny === undefined ? { ...ran, context: [...(ran.context ?? []), verdict.warn] } : ran
-  })
-
-  on('tool.call', { tool: 'NotebookEdit' }, async ($, e, next) => {
-    const verdict = await guard($, e, e.notebook_path)
-    if (verdict && 'deny' in verdict) return { deny: verdict.deny }
-    const ran = await next(e)
-    return verdict && ran.deny === undefined ? { ...ran, context: [...(ran.context ?? []), verdict.warn] } : ran
-  })
 
   // ---- 文脈・帯・記録 ----
 
