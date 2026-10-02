@@ -190,3 +190,53 @@ describe('セッション・プロンプト・帯', () => {
     }
   })
 })
+
+describe('タスク一覧のペイン', () => {
+  const PANE = {
+    plugin: 'lightpm',
+    component: 'Pane',
+    requestId: 'lightpm-tasks',
+    props: { title: 'LightPM タスク', isFocused: true, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  } as const
+
+  test('優先順に並び、選ぶと「やること」を展開・折りたたみできる', async ($, on) => {
+    world(on)
+    await $.tool.call(add({ ...MAX_FEATURE, acceptance: ['CSV をダウンロードできる', '空の一覧でも出力できる'] }))
+    await $.tool.call(add({ title: '設定画面', kind: 'feature', priority: 'high', acceptance: ['保存できる'] }))
+    await $.tool.call(add({ title: 'ボタンの色', kind: 'polish', priority: 'low', acceptance: ['色が揃う'] }))
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      const labels = (await ui.findAll({ type: 'Button' })).map(b => b.text)
+      expect(labels).toEqual(['▸ 1. T-0001 [max] CSV エクスポートを実装する', '▸ 2. T-0002 [high] 設定画面', '▸ T-0003 [low] ボタンの色'])
+      expect((await ui.find({ type: 'Text', text: '後回し（1）' }))?.text).toBe('後回し（1）')
+      expect(await ui.find({ type: 'Text', text: '2. 空の一覧でも出力できる' })).toBeUndefined()
+
+      await ui.press({ key: 't:T-0001' })
+      expect((await ui.find({ key: 't:T-0001' }))?.text).toBe('▾ 1. T-0001 [max] CSV エクスポートを実装する')
+      expect((await ui.find({ type: 'Text', text: '2. 空の一覧でも出力できる' }))?.text).toBe('2. 空の一覧でも出力できる')
+
+      await ui.press({ key: 't:T-0001' })
+      expect(await ui.find({ type: 'Text', text: '2. 空の一覧でも出力できる' })).toBeUndefined()
+      await ui.unmount()
+    }
+  })
+
+  test('/pm view でペインを開き、帯の「一覧」ボタンからも開ける', async ($, on) => {
+    world(on)
+    const opened: string[] = []
+    on('ui.open', ($, e) => {
+      opened.push(e.id)
+      return { value: { isPlaced: true } }
+    })
+    await $.command.run(pm('init'))
+    expect((await $.command.run(pm('view'))).text).toContain('タスク一覧を開きました')
+    const band = await $.ui.mount({
+      plugin: 'lightpm',
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+    })
+    await band.press({ key: 'board' })
+    expect(opened).toEqual(['lightpm-tasks', 'lightpm-tasks'])
+  })
+})

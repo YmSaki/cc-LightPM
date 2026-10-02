@@ -327,3 +327,52 @@ export const nextTask = (snapshot: Snapshot, now: string, options: { dryRun?: bo
     return draft.outcome({ kind: 'task', phase, task: chosen, resumed: false, phaseAdvanced: advanced, deferred, restored, trace })
   }
 }
+
+// ---- 一覧（表示用の並び） ----
+
+export type BoardGroup = 'active' | 'next' | 'blocked' | 'later'
+export type BoardItem = { task: Task; group: BoardGroup; eff: Priority; note: string | null }
+
+const UNTIL_ORDER: DeferUntil[] = [...PHASES, 'post']
+
+/**
+ * 未完了のタスクを、pm_next が選ぶ順に並べる。状態は変えない。
+ * 作業中 → 次にやる順（着手可能を並べ替えた順）→ 依存が未完了 → 後回し。
+ */
+export const boardOf = (snapshot: Snapshot): BoardItem[] => {
+  const tasks = [...snapshot.tasks].sort(byId)
+  const byKey = new Map(tasks.map(t => [t.id, t]))
+  const policy = resolvePolicy(snapshot.config.policy)
+  const phase = snapshot.state.phase
+  const eff = effectivePriorities(tasks)
+  const dependents = dependentsOf(tasks)
+  const effOf = (t: Task): number => eff.get(t.id) ?? ordinal(t.priority)
+  const item = (task: Task, group: BoardGroup, note: string | null = null): BoardItem => ({ task, group, eff: priorityAt(effOf(task)), note })
+
+  const active = tasks.filter(t => t.status === 'in_progress').map(t => item(t, 'active'))
+  const next: Task[] = []
+  const blocked: BoardItem[] = []
+  const later: { item: BoardItem; until: DeferUntil }[] = []
+  for (const t of tasks) {
+    if (t.status !== 'todo' && t.status !== 'deferred') continue
+    const admission = admits(policy, phase, t, effOf(t))
+    if (!admission.ok) {
+      const until = deferUntil(policy, phase, t, effOf(t))
+      later.push({ item: item(t, 'later', `${until === 'post' ? 'リリース後' : `${until} から`}（${admission.reason}）`), until })
+      continue
+    }
+    const waiting = t.depends_on.filter(dep => {
+      const d = byKey.get(dep)
+      return d === undefined || !isResolved(d)
+    })
+    if (waiting.length === 0) next.push(t)
+    else blocked.push(item(t, 'blocked', `${waiting.join(', ')} の完了待ち`))
+  }
+  const byEff = (a: BoardItem, b: BoardItem): number => ordinal(b.eff) - ordinal(a.eff) || byId(a.task, b.task)
+  return [
+    ...active,
+    ...rank(next, phase, eff, dependents).map(t => item(t, 'next')),
+    ...blocked.sort(byEff),
+    ...later.sort((a, b) => UNTIL_ORDER.indexOf(a.until) - UNTIL_ORDER.indexOf(b.until) || byEff(a.item, b.item)).map(l => l.item),
+  ]
+}

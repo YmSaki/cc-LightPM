@@ -56,14 +56,39 @@ claude --plugin-dir /path/to/cc-lightpm
 プロンプトの上の帯に、現在のフェーズ、作業中のタスク、残数が1行で表示されます。
 
 ```text
-LightPM Alpha · ▶ T-0003 CLI エントリと add を実装する [max] · todo 3 · 後回し 1 · 完了 2
+LightPM Alpha · ▶ T-0003 CLI エントリと add を実装する [max] · todo 3 · 後回し 1 · 完了 2  [ 一覧 ]
 ```
+
+### タスク一覧
+
+`/pm view`、または帯の `[ 一覧 ]` を押すと、タスク一覧のペインが開きます。タスクは `pm_next` が選ぶ順（優先順）に並んでいます。行を選んで Enter かクリックで、そのタスクの「やること」（完了条件）が展開されます。Esc で閉じます。
+
+```text
+LightPM Alpha · 完了 2
+
+作業中（1）
+▸ T-0003 [max] CLI エントリと add を実装する
+
+次にやる順（2）
+▾ 1. T-0002 [low→max] 保存処理を整理する
+      やること（完了条件）
+      1. JSON の読み書きを store.ts にまとめる
+      2. 既存のテストが通る
+      種別 refactor · 主なファイル: src/store.ts
+▸ 2. T-0004 [high] list コマンド
+
+後回し（1）
+▸ T-0006 [low] 色の調整
+```
+
+`[low→max]` は、元の優先度が `low` で、`max` のタスクの前提になっているため実効優先度が `max` になっている、という意味です。
 
 ### `/pm` のサブコマンド
 
 | コマンド | 内容 |
 | --- | --- |
 | `/pm` / `/pm status` | フェーズ、作業中のタスク、todo・後回しの一覧、次の候補、フェーズを抜ける条件 |
+| `/pm view` | タスク一覧のペインを開く（優先順、選んで展開できる） |
 | `/pm init [phase]` | `.pm/` を作る（`pm_add` でも自動で作られる） |
 | `/pm next` | 次に選ばれるタスクを表示する（状態は変えない） |
 | `/pm list [status]` | タスクの一覧 |
@@ -128,7 +153,7 @@ LightPM Alpha · ▶ T-0003 CLI エントリと add を実装する [max] · tod
 | サブエージェント | `lightpm:pm-implementer` | 1タスクを実装し、JSON で報告する |
 | ツール | `mcp__lightpm__pm_status` / `pm_next` / `pm_add` / `pm_update` / `pm_complete` | Claude が呼ぶ操作（モッドが登録） |
 | コマンド | `/pm` | 人が使う |
-| モッド | `hooks/lightpm.tsx` | ツールとコマンドの処理、プロンプトへの「今やること」の追加、帯、監査ログ |
+| モッド | `hooks/lightpm.tsx` | ツールとコマンドの処理、プロンプトへの「今やること」の追加、帯、タスク一覧のペイン、監査ログ |
 
 モッドが使う API は `$.fs`（`.pm/` の読み書きのみ）、`$.state`、`$.ui`、`$.tool`、`$.command`、`$.clock`、`$.session.root` です。ネットワークも LLM も呼ばないので、プランや API キーを消費しません。`claude plugin validate .claude-plugin/plugin.json` で一覧を確認できます。
 

@@ -1,10 +1,10 @@
-// LightPM のモッド。ツールとコマンドを登録し、.pm/ を読み書きし、帯を出す。
+// LightPM のモッド。ツールとコマンドを登録し、.pm/ を読み書きし、帯とタスク一覧のペインを出す。
 // 判断はすべて src/core の純粋関数が行い、ここは入出力だけを受け持つ。
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { bandText, contextFor, formatComplete, formatList, formatNext, formatPolicy, formatStatus, formatWhy, summarize } from '../src/core/format.ts'
+import { PHASE_LABEL, bandText, boardRows, contextFor, formatComplete, formatList, formatNext, formatPolicy, formatStatus, formatWhy, summarize } from '../src/core/format.ts'
 import type { Summary } from '../src/core/format.ts'
 import { InputError, addTask, completeTask, setPhase, updateTask } from '../src/core/ops.ts'
 import { nextTask } from '../src/core/select.ts'
@@ -12,12 +12,18 @@ import { PHASES } from '../src/core/types.ts'
 import type { Phase } from '../src/core/types.ts'
 import { Repo } from '../src/io/repo.ts'
 import type { Loaded } from '../src/io/repo.ts'
-import type { LightpmSummary } from '../types'
+import type { LightpmBoardRow, LightpmSummary } from '../types'
 
 type $ = EngineInterface
 
 const SUMMARY = { plugin: 'lightpm', key: 'summary' } as const
 const summaryAtom = atom(SUMMARY, null)
+const boardAtom = atom({ plugin: 'lightpm', key: 'board' } as const, [])
+const expandedAtom = atom({ plugin: 'lightpm', key: 'expanded' } as const, [])
+
+/** タスク一覧のペイン。 */
+const PANE = 'lightpm-tasks'
+const openBoard = ($: $) => $.ui.open({ id: PANE, title: 'LightPM タスク', focus: true, closeOnEscape: true })
 
 const NOT_INITIALIZED =
   'LightPM はこのプロジェクトでまだ使われていません（.pm/ がない）。/pm init で始めるか、pm_add でタスクを登録すると .pm/ が作られます。'
@@ -130,11 +136,13 @@ const actorOf = (e: { agentId?: string }): string => (e.agentId ? `subagent:${e.
 const refresh = async ($: $, repo: Repo, loaded?: Loaded): Promise<Summary | null> => {
   if (!loaded && !(await repo.exists())) {
     await update($, summaryAtom, () => null)
+    await update($, boardAtom, () => [])
     return null
   }
   const snapshot = loaded ?? (await repo.load())
   const summary = summarize(snapshot, snapshot.errors.length)
   await update($, summaryAtom, () => summary as LightpmSummary)
+  await update($, boardAtom, () => boardRows(snapshot) as LightpmBoardRow[])
   return summary
 }
 
@@ -166,6 +174,7 @@ const answer = async (work: () => Promise<string>): Promise<{ result: string } |
 const HELP = [
   '/pm [status]            フェーズ、作業中のタスク、一覧',
   '/pm init [phase]        .pm/ を作る（既定 alpha）',
+  '/pm view                タスク一覧のペインを開く（優先順に並び、選んで展開できる）',
   '/pm next                次に選ばれるタスクを表示（状態は変えない）',
   '/pm list [status]       タスクの一覧（todo / in_progress / deferred / done / dropped）',
   '/pm why <id>            そのタスクが選ばれた・後回しになった理由',
@@ -188,6 +197,11 @@ const runCommand = async ($: $, args: string): Promise<string> => {
   if (!(await repo.exists())) return NOT_INITIALIZED
   const now = await nowIso($)
   switch (sub) {
+    case 'view': {
+      await refresh($, repo)
+      const opened = await openBoard($)
+      return opened.isPlaced ? 'タスク一覧を開きました（Esc で閉じる）。' : `タスク一覧を開けませんでした: ${opened.reason}`
+    }
     case 'status': {
       const loaded = await repo.load()
       await refresh($, repo, loaded)
@@ -237,7 +251,7 @@ const runCommand = async ($: $, args: string): Promise<string> => {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     for (const tool of TOOLS) await $.tool.register(tool)
-    await $.command.register({ name: 'pm', description: 'LightPM: フェーズとタスクの状態（/pm help）', argumentHint: '[status|init|next|list|why|phase|policy|refresh]' })
+    await $.command.register({ name: 'pm', description: 'LightPM: フェーズとタスクの状態（/pm help）', argumentHint: '[status|view|init|next|list|why|phase|policy|refresh]' })
     try {
       await refresh($, await repoOf($))
     } catch (err) {
@@ -361,12 +375,77 @@ export const register: Register = on => {
     if (e.props.hasSurvey) return next(e)
     const summary = await read($, summaryAtom)
     if (!summary) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     return (
-      <Box>
+      <Box gap={1}>
         <Text dimColor wrap="truncate-end">
           {bandText(summary)}
         </Text>
+        <Button key="board" label="一覧" onPress={() => void openBoard($)} />
+      </Box>
+    )
+  })
+
+  // ---- タスク一覧のペイン：優先順に並べ、選ぶと中身（やること）を展開する ----
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const summary = await read($, summaryAtom)
+    if (!summary) {
+      return (
+        <Box>
+          <Text dimColor>このプロジェクトでは LightPM を使っていません（/pm init で始める）。</Text>
+        </Box>
+      )
+    }
+    const rows = await read($, boardAtom)
+    const expanded = await read($, expandedAtom)
+    const toggle = (id: string) => () =>
+      void update($, expandedAtom, list => (list.includes(id) ? list.filter(x => x !== id) : [...list, id]))
+
+    const GROUPS = [
+      { group: 'active', heading: '作業中' },
+      { group: 'next', heading: '次にやる順' },
+      { group: 'blocked', heading: '前提の完了待ち' },
+      { group: 'later', heading: '後回し' },
+    ] as const
+
+    const row = (r: LightpmBoardRow, index: number) => {
+      const isOpen = expanded.includes(r.id)
+      const priority = r.eff === r.priority ? r.priority : `${r.priority}→${r.eff}`
+      const number = r.group === 'next' ? `${index + 1}. ` : ''
+      return (
+        <Box key={`row:${r.id}`} flexDirection="column">
+          <Button key={`t:${r.id}`} plain label={`${isOpen ? '▾' : '▸'} ${number}${r.id} [${priority}] ${r.title}`} onPress={toggle(r.id)} />
+          {isOpen && (
+            <Box key={`d:${r.id}`} flexDirection="column" paddingLeft={4}>
+              <Text dimColor>やること（完了条件）</Text>
+              {r.acceptance.map((item, i) => (
+                <Text wrap="wrap">{`${i + 1}. ${item}`}</Text>
+              ))}
+              <Text dimColor wrap="wrap">{`種別 ${r.kind}${r.dependsOn.length > 0 ? ` · 前提 ${r.dependsOn.join(', ')}` : ''}${r.note ? ` · ${r.note}` : ''}`}</Text>
+              {r.paths.length > 0 && <Text dimColor wrap="wrap">{`主なファイル: ${r.paths.join(', ')}`}</Text>}
+              {r.body !== '' && <Text wrap="wrap">{r.body}</Text>}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+
+    return (
+      <Box flexDirection="column">
+        <Text bold wrap="truncate-end">{`LightPM ${PHASE_LABEL[summary.phase]} · 完了 ${summary.counts.done}`}</Text>
+        {rows.length === 0 && <Text dimColor>未完了のタスクはありません。/lightpm:pm-plan で登録できます。</Text>}
+        {GROUPS.map(({ group, heading }) => {
+          const list = rows.filter(r => r.group === group)
+          if (list.length === 0) return null
+          return (
+            <Box key={`g:${group}`} flexDirection="column" marginTop={1}>
+              <Text dimColor>{`${heading}（${list.length}）`}</Text>
+              {list.map(row)}
+            </Box>
+          )
+        })}
       </Box>
     )
   })

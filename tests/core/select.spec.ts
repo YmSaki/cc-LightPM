@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { nextTask, effectivePriorities } from '../../src/core/select.ts'
+import { boardOf, nextTask, effectivePriorities } from '../../src/core/select.ts'
 import { addTask } from '../../src/core/ops.ts'
 import { priorityAt } from '../../src/core/types.ts'
 import type { Task } from '../../src/core/types.ts'
@@ -224,5 +224,37 @@ describe('選択アルゴリズム', () => {
     const out = nextTask(snap, NOW, { dryRun: true })
     assert.equal(out.state.active, null)
     assert.equal(out.tasks.length, 0)
+  })
+})
+
+describe('一覧の並び', () => {
+  test('作業中 → 次にやる順 → 前提の完了待ち → 後回し。次にやる順の先頭は pm_next が選ぶもの', () => {
+    const tasks = [
+      task({ id: 'T-0001', kind: 'feature', priority: 'high' }),
+      task({ id: 'T-0002', kind: 'feature', priority: 'max', depends_on: ['T-0005'] }),
+      task({ id: 'T-0003', kind: 'bug', priority: 'mid', severity: 'S2', impacts: 'T-0001' }),
+      task({ id: 'T-0004', kind: 'feature', priority: 'xhigh', status: 'in_progress' }),
+      task({ id: 'T-0005', kind: 'refactor', priority: 'low' }),
+      task({ id: 'T-0006', kind: 'polish', priority: 'low', status: 'deferred', defer: { until: 'post', reason: 'P-FLOOR' } }),
+      task({ id: 'T-0007', kind: 'feature', priority: 'max', status: 'done' }),
+    ]
+    const board = boardOf(snapshot(tasks))
+    assert.deepEqual(
+      board.map(b => [b.task.id, b.group, b.eff]),
+      [
+        ['T-0004', 'active', 'xhigh'],
+        ['T-0005', 'next', 'max'],
+        ['T-0001', 'next', 'high'],
+        ['T-0002', 'blocked', 'max'],
+        ['T-0003', 'later', 'mid'],
+        ['T-0006', 'later', 'low'],
+      ],
+    )
+    assert.equal(board.find(b => b.task.id === 'T-0003')?.note, 'beta から（P-FLOOR）')
+    assert.equal(board.find(b => b.task.id === 'T-0002')?.note, 'T-0005 の完了待ち')
+
+    const withoutActive = tasks.filter(t => t.id !== 'T-0004')
+    const picked = nextTask(snapshot(withoutActive), NOW)
+    assert.equal(picked.result.kind === 'task' && picked.result.task.id, boardOf(snapshot(withoutActive))[0]?.task.id)
   })
 })

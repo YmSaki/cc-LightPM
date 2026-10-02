@@ -2,8 +2,8 @@
 
 import { serializeTask } from './frontmatter.ts'
 import { DEFAULT_POLICY, resolvePolicy } from './policy.ts'
-import { byId, effectivePriorities, exitCheck } from './select.ts'
-import type { NextResult } from './select.ts'
+import { boardOf, byId, effectivePriorities, exitCheck } from './select.ts'
+import type { BoardGroup, NextResult } from './select.ts'
 import type { CompleteResult } from './ops.ts'
 import { PHASES, STATUSES, priorityAt } from './types.ts'
 import type { Phase, Snapshot, Status, Task } from './types.ts'
@@ -35,6 +35,41 @@ const HOW = [
   'acceptance をすべて満たしたら完了。scope.paths は主に触るファイルの目安',
   '作業中に気づいた別の作業は、報告の discovered に書く。登録されて優先度順に回ってくる',
 ]
+
+/** タスク一覧のペインに渡す行（$.state に置く素のデータ）。 */
+export type BoardRow = {
+  id: string
+  title: string
+  kind: string
+  priority: string
+  eff: string
+  group: BoardGroup
+  note: string | null
+  acceptance: string[]
+  paths: string[]
+  dependsOn: string[]
+  body: string
+}
+
+const BOARD_LIMIT = 300
+const BODY_LIMIT = 400
+
+export const boardRows = (snapshot: Snapshot): BoardRow[] =>
+  boardOf(snapshot)
+    .slice(0, BOARD_LIMIT)
+    .map(({ task, group, eff, note }) => ({
+      id: task.id,
+      title: task.title,
+      kind: task.kind,
+      priority: task.priority,
+      eff,
+      group,
+      note,
+      acceptance: task.acceptance,
+      paths: task.scope.paths,
+      dependsOn: task.depends_on,
+      body: task.body.length > BODY_LIMIT ? `${task.body.slice(0, BODY_LIMIT)}…` : task.body,
+    }))
 
 /** pm-implementer に渡すタスク契約。 */
 export const taskContract = (task: Task, phase: Phase): string =>
