@@ -1,0 +1,13 @@
+{
+  "name": "cc-lightpm",
+  "owner": { "name": "ymsaki" },
+  "metadata": { "description": "LightPM: phase- and priority-driven task selection for Claude Code" },
+  "plugins": [
+    {
+      "name": "lightpm",
+      "source": "./",
+      "description": "リリースフェーズと優先度から「次にやる作業」を規則で1件に決める",
+      "version": "0.1.0"
+    }
+  ]
+}

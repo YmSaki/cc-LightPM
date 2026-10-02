@@ -1,0 +1,3 @@
+# Claude Code がモッドを読み込むたびに書き出す型定義
+.claude-plugin/types/
+node_modules/
