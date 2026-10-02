@@ -53,7 +53,7 @@ updated: 2026-10-02T00:18:04.101Z
 | `severity`、`impacts` | バグの重大度と影響先（bug で必須） |
 | `release_blocker` | リリース阻害のバグか |
 | `defer.until`、`defer.reason` | 後回しの解除先と理由 |
-| `failures`、`notes` | 連続した失敗の回数と、直近のメモ |
+| `notes` | 直近の更新や完了のメモ |
 | `created`、`updated` | 作成日時と更新日時 |
 
 タスクは削除しません。
@@ -89,6 +89,5 @@ updated: 2026-10-02T00:18:04.101Z
 | `task.deferred`、`task.restored` | 後回しにしたとき、todo に戻したとき |
 | `task.reclassified` | 分類の変更（旧値、新値、理由） |
 | `task.status`、`task.updated` | 状態の変更、そのほかの項目の変更 |
-| `task.completed`、`task.incomplete`、`task.failed` | 完了、完了条件の不足、失敗 |
+| `task.completed` | 完了（完了前の状態とメモ） |
 | `phase.advanced`、`phase.set` | 自動の昇格、手動の変更 |
-| `agent.spawn` | サブエージェントの起動 |

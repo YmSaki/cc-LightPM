@@ -31,11 +31,6 @@ export const summarize = (snapshot: Snapshot, errors: number): Summary => {
   }
 }
 
-const HOW = [
-  'acceptance をすべて満たしたら完了。scope.paths は主に触るファイルの目安',
-  '作業中に気づいた別の作業は、報告の discovered に書く。登録されて優先度順に回ってくる',
-]
-
 /** タスク一覧のペインに渡す行（$.state に置く素のデータ）。 */
 export type BoardRow = {
   id: string
@@ -71,35 +66,6 @@ export const boardRows = (snapshot: Snapshot): BoardRow[] =>
       body: task.body.length > BODY_LIMIT ? `${task.body.slice(0, BODY_LIMIT)}…` : task.body,
     }))
 
-/** pm-implementer に渡すタスク契約。 */
-export const taskContract = (task: Task, phase: Phase): string =>
-  [
-    `## タスク契約 ${task.id}（フェーズ: ${PHASE_LABEL[phase]}）`,
-    '',
-    '```markdown',
-    serializeTask(task).trimEnd(),
-    '```',
-    '',
-    '進め方:',
-    ...HOW.map(r => `- ${r}`),
-    '',
-    '報告の形式（pm_complete にそのまま渡す）:',
-    '```json',
-    JSON.stringify(
-      {
-        taskId: task.id,
-        status: 'done | failed',
-        changedFiles: ['変更したファイル（ルートからの相対パス）'],
-        acceptance: task.acceptance.map(item => ({ item, met: true })),
-        discovered: [{ title: '作業中に気づいた別の作業', kind: 'bug', severity: 'S2', impacts: task.id }],
-        notes: 'failed のときは原因',
-      },
-      null,
-      2,
-    ),
-    '```',
-  ].join('\n')
-
 const line = (t: Task): string =>
   `${t.id} [${t.priority} ${t.kind}] ${t.title}${t.defer ? `（後回し: ${t.defer.reason} → ${t.defer.until}）` : ''}`
 
@@ -113,11 +79,11 @@ export const formatNext = (result: NextResult, dryRun = false): string => {
     }
   }
   if (result.kind === 'done') {
-    out.push('完了: GM の release タスクがすべて終わった。プロジェクトは完了です。ループを終えてください。')
+    out.push('完了: GM の release タスクがすべて終わり、プロジェクトは完了です。')
     return out.join('\n')
   }
   if (result.kind === 'wait') {
-    out.push('待ち: 着手できるタスクがありません。ループを終えて人に報告してください。')
+    out.push('待ち: 着手できるタスクがありません。')
     out.push(...result.reasons.map(r => `- ${r}`))
     return out.join('\n')
   }
@@ -137,8 +103,7 @@ export const formatNext = (result: NextResult, dryRun = false): string => {
     )
   }
   if (!dryRun) {
-    out.push('')
-    out.push(taskContract(task, result.phase))
+    out.push('', `タスクの内容（フェーズ ${PHASE_LABEL[result.phase]}）:`, '```markdown', serializeTask(task).trimEnd(), '```')
   }
   return out.join('\n')
 }
@@ -193,25 +158,8 @@ export const formatList = (tasks: readonly Task[], status?: string): string => {
   return list.map(t => `${t.status.padEnd(11)} ${line(t)}`).join('\n')
 }
 
-export const formatComplete = (result: CompleteResult): string => {
-  switch (result.kind) {
-    case 'completed':
-      return [
-        `${result.task.id} を完了にした。`,
-        '報告の discovered があれば pm_add で登録してから、pm_next で次のタスクを取得してください。',
-      ].join('\n')
-    case 'failed':
-      return result.stop
-        ? `${result.task.id} は ${result.failures} 回続けて失敗したため todo に戻した。ループを止めて人に報告してください。`
-        : `${result.task.id} を失敗として todo に戻した（${result.failures} 回目）。pm_next でもう一度取得できます。`
-    case 'incomplete':
-      return [
-        `${result.task.id} はまだ完了ではありません。残っている完了条件:`,
-        ...result.unmet.map(u => `- ${u}`),
-        '作業を続けるか、満たせないなら status: failed で報告してください。',
-      ].join('\n')
-  }
-}
+export const formatComplete = (result: CompleteResult): string =>
+  `${result.task.id} を完了にした。次のタスクは pm_next で取得できます。`
 
 /** プロンプトに足す文脈の上限（文字数）。切り詰めるときは末尾の「…」を含めてこの長さに収める。 */
 const CONTEXT_LIMIT = 600
@@ -220,7 +168,7 @@ const CONTEXT_LIMIT = 600
 export const contextFor = (summary: Summary): string => {
   const head = `[LightPM] フェーズ ${PHASE_LABEL[summary.phase]}。`
   const body = summary.active
-    ? `今やること: ${summary.active.id}「${summary.active.title}」（${summary.active.priority} ${summary.active.kind}）。終わったら mcp__lightpm__pm_complete で報告し、mcp__lightpm__pm_next で次を取る。気づいた別の作業は mcp__lightpm__pm_add で登録すれば、優先度順に回ってくる。`
+    ? `今やること: ${summary.active.id}「${summary.active.title}」（${summary.active.priority} ${summary.active.kind}）。終わったら mcp__lightpm__pm_complete で完了にし、次は mcp__lightpm__pm_next で取る。気づいた別の作業は mcp__lightpm__pm_add で登録すれば、優先度順に回ってくる。`
     : `作業中のタスクはない（todo ${summary.counts.todo}、後回し ${summary.counts.deferred}）。作業を始めるなら mcp__lightpm__pm_next で次のタスクを取る。新しい作業は mcp__lightpm__pm_add で登録する。`
   const text = head + body
   return text.length <= CONTEXT_LIMIT ? text : `${text.slice(0, CONTEXT_LIMIT - 1)}…`
@@ -270,9 +218,6 @@ export const formatWhy = (taskId: string, task: Task | undefined, events: readon
         break
       case 'task.completed':
         out.push(`${ts} 完了`)
-        break
-      case 'task.failed':
-        out.push(`${ts} 失敗 ${e.failures} 回目${e.notes ? `: ${e.notes}` : ''}`)
         break
       default:
         out.push(`${ts} ${String(e.event)}`)

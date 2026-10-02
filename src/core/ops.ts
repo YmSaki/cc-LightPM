@@ -38,7 +38,7 @@ const pick = <T extends string>(value: unknown, values: readonly T[], field: str
   return fail(`${field} は ${values.join(' / ')} のいずれかです（${JSON.stringify(value)} は不可）`)
 }
 
-/** 主に触るファイルの目安。実装者への手がかりで、制限ではない。 */
+/** 主に触るファイルの目安。作業する側への手がかりで、制限ではない。 */
 const toPaths = (paths: string[] | undefined): string[] => (paths ?? []).map(normalizePath).filter(p => p !== '')
 
 const checkDeps = (deps: string[] | undefined, self: string | null, tasks: Map<string, Task>): string[] => {
@@ -282,60 +282,23 @@ export const updateTask = (snapshot: Snapshot, input: UpdateInput, now: string, 
 
 export type CompleteInput = Readonly<Record<string, unknown>>
 
-export type CompleteResult =
-  | { kind: 'completed'; task: Task; files: string[] }
-  | { kind: 'failed'; task: Task; failures: number; stop: boolean }
-  | { kind: 'incomplete'; task: Task; unmet: string[] }
+export type CompleteResult = { task: Task }
 
-/** 監査ログに残すファイル名の上限（1行が大きくなりすぎないように）。 */
-const LOG_FILES = 200
-/** 同じタスクがこの回数続けて失敗したら、ループを止めて人に報告する。 */
-const MAX_CONSECUTIVE_FAILURES = 2
-
+/** タスクを完了にする。作業中でなくても（todo や後回しのタスクも）完了にできる。 */
 export const completeTask = (snapshot: Snapshot, input: CompleteInput, now: string, actor = 'main'): Outcome<CompleteResult> => {
   const draft = new Draft(snapshot, now)
   const id = typeof input.taskId === 'string' ? input.taskId.trim() : ''
   const task = draft.tasks.get(id) ?? fail(`タスク ${id || '(taskId なし)'} は存在しません`)
-  if (task.status !== 'in_progress') fail(`${id} は作業中ではありません（status: ${task.status}）。pm_next で取得したタスクを完了にします`)
-  const status = pick(input.status, ['done', 'failed'] as const, 'status') ?? fail('status は done か failed です')
+  if (task.status === 'done' || task.status === 'dropped') fail(`${id} は既に ${task.status} です`)
   const notes = typeof input.notes === 'string' ? oneLine(input.notes) : ''
-  const release = (): void => {
-    if (draft.state.active === id) draft.state.active = null
-  }
-
-  if (status === 'failed') {
-    const failures = (task.failures ?? 0) + 1
-    task.failures = failures
-    task.status = 'todo'
-    if (notes) task.notes = notes
-    release()
-    draft.put(task)
-    draft.log({ event: 'task.failed', actor, taskId: id, failures, notes: notes || null })
-    return draft.outcome({ kind: 'failed', task, failures, stop: failures >= MAX_CONSECUTIVE_FAILURES })
-  }
-
-  // 完了条件をすべて満たしたか
-  const reported = Array.isArray(input.acceptance)
-    ? (input.acceptance as unknown[]).filter((a): a is { item?: unknown; met?: unknown } => typeof a === 'object' && a !== null)
-    : []
-  const unmet = task.acceptance.filter((item, index) => {
-    const byText = reported.find(r => typeof r.item === 'string' && r.item.trim() === item.trim())
-    const entry = byText ?? (reported.length === task.acceptance.length ? reported[index] : undefined)
-    return entry?.met !== true
-  })
-  if (unmet.length > 0) {
-    draft.log({ event: 'task.incomplete', actor, taskId: id, unmet })
-    return draft.outcome({ kind: 'incomplete', task, unmet })
-  }
-
-  const files = [...new Set((strings(input.changedFiles, 'changedFiles') ?? []).map(normalizePath))].filter(f => f !== '').sort()
+  const from = task.status
   task.status = 'done'
-  delete task.failures
+  delete task.defer
   if (notes) task.notes = notes
-  release()
+  if (draft.state.active === id) draft.state.active = null
   draft.put(task)
-  draft.log({ event: 'task.completed', actor, taskId: id, files: files.slice(0, LOG_FILES), count: files.length, acceptance: task.acceptance.length })
-  return draft.outcome({ kind: 'completed', task, files })
+  draft.log({ event: 'task.completed', actor, taskId: id, from, notes: notes || null })
+  return draft.outcome({ task })
 }
 
 // ---- フェーズの手動変更 ----

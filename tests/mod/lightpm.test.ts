@@ -74,19 +74,12 @@ describe('ツール', () => {
 
     const next = text(await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never))
     expect(next).toContain('選択: T-0001')
-    expect(next).toContain('タスク契約 T-0001')
+    expect(next).toContain('タスクの内容（フェーズ Alpha）')
+    expect(next).toContain('id: T-0001')
     const state = JSON.parse(w.files.get(`${ROOT}/.pm/state.json`) ?? '{}')
     expect(state.active).toBe('T-0001')
 
-    const done = text(
-      await $.tool.call({
-        tool: 'mcp__lightpm__pm_complete',
-        taskId: 'T-0001',
-        status: 'done',
-        changedFiles: ['src/export/csv.ts'],
-        acceptance: [{ item: '一覧画面から CSV をダウンロードできる', met: true }],
-      } as never),
-    )
+    const done = text(await $.tool.call({ tool: 'mcp__lightpm__pm_complete', taskId: 'T-0001' } as never))
     expect(done).toContain('T-0001 を完了にした')
     expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('status: done')
 
@@ -114,7 +107,7 @@ describe('ツール', () => {
     await $.tool.call(add(MAX_FEATURE))
     await $.tool.call({ tool: 'mcp__lightpm__pm_next' } as never)
     await $.tool.call({ tool: 'mcp__lightpm__pm_update', id: 'T-0001', priority: 'xhigh', reason: 'テスト' } as never)
-    await $.tool.call({ tool: 'mcp__lightpm__pm_complete', taskId: 'T-0001', status: 'failed', notes: 'x' } as never)
+    await $.tool.call({ tool: 'mcp__lightpm__pm_complete', taskId: 'T-0001', notes: 'x' } as never)
     await $.tool.call({ tool: 'mcp__lightpm__pm_status' } as never)
     await $.command.run(pm('phase set beta テスト'))
     expect(w.writes.length > 0).toBe(true)

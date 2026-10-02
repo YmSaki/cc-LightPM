@@ -34,7 +34,7 @@ export type Task = {
   priority: Priority
   status: Status
   depends_on: string[]
-  /** 主に触るファイルの目安（実装者への手がかり）。 */
+  /** 主に触るファイルの目安（作業する側への手がかり）。 */
   scope: { paths: string[] }
   acceptance: string[]
   non_goals: string[]
@@ -43,9 +43,7 @@ export type Task = {
   impacts?: string
   release_blocker?: boolean
   defer?: { until: DeferUntil; reason: DeferReason }
-  /** 連続した失敗の回数。完了で 0 に戻る。 */
-  failures?: number
-  /** 直近の失敗や更新のメモ。 */
+  /** 直近の更新や完了のメモ。 */
   notes?: string
   created: string
   updated: string

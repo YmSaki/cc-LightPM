@@ -138,38 +138,32 @@ describe('pm_add / pm_update の検証', () => {
 })
 
 describe('pm_complete', () => {
-  const active = (): ReturnType<typeof snapshot> => {
-    const snap = snapshot([task({ id: 'T-0001', status: 'in_progress', scope: { paths: ['src/export/**'] }, acceptance: ['CSV が出る', '空でも出る'] })])
+  test('作業中のタスクを完了にすると active が外れる', () => {
+    const snap = snapshot([task({ id: 'T-0001', status: 'in_progress' })])
     snap.state.active = 'T-0001'
-    return snap
-  }
-  const met = [
-    { item: 'CSV が出る', met: true },
-    { item: '空でも出る', met: true },
-  ]
-
-  test('完了条件をすべて満たせば done にして active を外す', () => {
-    const out = completeTask(active(), { taskId: 'T-0001', status: 'done', changedFiles: ['src/export/csv.ts', 'src/ui/theme.ts'], acceptance: met }, NOW)
-    assert.equal(out.result.kind, 'completed')
+    const out = completeTask(snap, { taskId: 'T-0001', notes: '手元で確認済み' }, NOW)
     assert.equal(out.result.task.status, 'done')
+    assert.equal(out.result.task.notes, '手元で確認済み')
     assert.equal(out.state.active, null)
-    assert.deepEqual(out.events.at(-1)?.files, ['src/export/csv.ts', 'src/ui/theme.ts'])
+    assert.deepEqual(out.events, [{ event: 'task.completed', actor: 'main', taskId: 'T-0001', from: 'in_progress', notes: '手元で確認済み' }])
   })
 
-  test('満たしていない完了条件があれば、まだ完了にしない', () => {
-    const out = completeTask(active(), { taskId: 'T-0001', status: 'done', acceptance: [{ item: 'CSV が出る', met: true }] }, NOW)
-    assert.equal(out.result.kind, 'incomplete')
-    assert.deepEqual(out.result.kind === 'incomplete' && out.result.unmet, ['空でも出る'])
+  test('todo や後回しのタスクも直接完了にできる', () => {
+    const snap = snapshot([
+      task({ id: 'T-0001', status: 'todo' }),
+      task({ id: 'T-0002', kind: 'polish', priority: 'low', status: 'deferred', defer: { until: 'post', reason: 'P-FLOOR' } }),
+    ])
+    assert.equal(completeTask(snap, { taskId: 'T-0001' }, NOW).result.task.status, 'done')
+    const deferred = completeTask(snap, { taskId: 'T-0002' }, NOW).result.task
+    assert.equal(deferred.status, 'done')
+    assert.equal(deferred.defer, undefined)
   })
 
-  test('2回続けて失敗したらループを止める', () => {
-    const first = completeTask(active(), { taskId: 'T-0001', status: 'failed', notes: 'テストが通らない' }, NOW)
-    assert.equal(first.result.kind === 'failed' && first.result.stop, false)
-    assert.equal(first.result.task.status, 'todo')
-    const again = active()
-    again.tasks[0] = { ...(again.tasks[0] as (typeof again.tasks)[number]), failures: 1 }
-    const second = completeTask(again, { taskId: 'T-0001', status: 'failed' }, NOW)
-    assert.equal(second.result.kind === 'failed' && second.result.stop, true)
+  test('完了済みや取り下げ済みのタスクは完了にできない', () => {
+    const snap = snapshot([task({ id: 'T-0001', status: 'done' }), task({ id: 'T-0002', status: 'dropped' })])
+    assert.throws(() => completeTask(snap, { taskId: 'T-0001' }, NOW), /既に done/)
+    assert.throws(() => completeTask(snap, { taskId: 'T-0002' }, NOW), /既に dropped/)
+    assert.throws(() => completeTask(snap, { taskId: 'T-0099' }, NOW), /存在しません/)
   })
 })
 
@@ -190,7 +184,6 @@ describe('タスクファイル', () => {
       impacts: 'T-0003',
       release_blocker: true,
       defer: { until: 'beta', reason: 'P-FLOOR' },
-      failures: 1,
       notes: 'true',
       body: '主要シナリオの最後のステップ。\n\n- 手順',
     })

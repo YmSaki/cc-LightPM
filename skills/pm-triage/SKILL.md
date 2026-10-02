@@ -1,6 +1,6 @@
 ---
 name: pm-triage
-description: 作業中に気づいた別の作業や、人から受けた新しい依頼を、LightPM のルーブリックで分類して pm_add で登録する。「これもタスクにして」「後でやる」「バグを見つけた」ときや、pm-implementer の報告に discovered があるときに使う。
+description: 作業中に気づいた別の作業や、人から受けた新しい依頼を、LightPM のルーブリックで分類して pm_add で登録する。「これもタスクにして」「後でやる」「バグを見つけた」ときに使う。
 argument-hint: "[問題・依頼の説明]"
 ---
 

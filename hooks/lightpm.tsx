@@ -43,7 +43,7 @@ const TASK_FIELDS = {
   impacts: { type: 'string', description: 'bug で必須。影響を受けるタスク ID（T-0003）か機能名' },
   impact_priority: { ...PRIORITY, description: 'impacts が機能名のとき、その機能の優先度（バグの表に使う）' },
   depends_on: { ...STRINGS, description: '実装上の前提になるタスク ID。「優先度が高いから先に」は依存ではない' },
-  scope_paths: { ...STRINGS, description: '主に触るファイルやディレクトリの目安（ルートからの相対、glob 可）。実装者への手がかり' },
+  scope_paths: { ...STRINGS, description: '主に触るファイルやディレクトリの目安（ルートからの相対、glob 可）。作業する側への手がかり' },
   acceptance: { ...STRINGS, description: '完了条件。1つ以上' },
   non_goals: { ...STRINGS, description: '紛らわしいときだけ、このタスクに含めないもの' },
   estimate: { type: 'string', enum: ['S', 'M', 'L'] },
@@ -61,7 +61,7 @@ const TOOLS = [
   {
     name: 'pm_next',
     description:
-      'LightPM: 次に着手するタスクを規則で1件決めて返す（作業中のものがあればそれ）。選んだタスクは in_progress になる。結果のタスク契約をそのまま pm-implementer に渡す。「待ち」か「完了」ならループを終える。',
+      'LightPM: 次に着手するタスクを規則で1件決め、作業中（in_progress）にして内容を返す。作業中のタスクがあればそれを返す。着手できるタスクがなければ「待ち」、プロジェクトが終わっていれば「完了」を返す。',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -89,21 +89,14 @@ const TOOLS = [
   {
     name: 'pm_complete',
     description:
-      'LightPM: pm-implementer の報告を渡してタスクを完了（または失敗）にする。完了条件がすべて満たされていれば完了になる。',
+      'LightPM: タスクを完了にする。作業中のタスクのほか、todo や後回しのタスクも完了にできる。作業中のタスクを完了にすると、作業中のタスクはなくなる。',
     inputSchema: {
       type: 'object',
       properties: {
-        taskId: { type: 'string' },
-        status: { type: 'string', enum: ['done', 'failed'] },
-        changedFiles: STRINGS,
-        acceptance: {
-          type: 'array',
-          items: { type: 'object', properties: { item: { type: 'string' }, met: { type: 'boolean' } }, required: ['item', 'met'] },
-        },
-        discovered: { type: 'array', items: { type: 'object' }, description: '作業中に気づいた別の作業。ここでは登録しないので、別に pm_add で登録する' },
-        notes: { type: 'string', description: 'failed のときは原因' },
+        taskId: { type: 'string', description: 'タスク ID（T-0001）' },
+        notes: { type: 'string', description: '完了についてのメモ（任意）' },
       },
-      required: ['taskId', 'status'],
+      required: ['taskId'],
     },
   },
 ]
@@ -329,10 +322,7 @@ export const register: Register = on => {
       return mutate($, async (r, loaded, now) => {
         const outcome = completeTask(loaded, e, now, actorOf(e))
         await r.persist(outcome, now)
-        let text = formatComplete(outcome.result)
-        const discovered = Array.isArray(e.discovered) ? e.discovered.length : 0
-        if (discovered > 0) text += `\n\n報告に discovered が ${discovered} 件あります。pm-triage のルーブリックで分類して pm_add で登録してください。`
-        return text
+        return formatComplete(outcome.result)
       })
     }),
   )
@@ -352,21 +342,6 @@ export const register: Register = on => {
       } catch (err) {
         $.ui.log(`LightPM: .pm/ を読み込めませんでした: ${String(err)}`, { to: 'debug' })
       }
-    }
-    return next(e)
-  })
-
-  on('agent.spawn', async ($, e, next) => {
-    const summary = (await $.state.get(SUMMARY)).value
-    if (summary) {
-      await exclusive(async () => {
-        const repo = await repoOf($)
-        if (!(await repo.exists())) return
-        await repo.appendLog(
-          [{ event: 'agent.spawn', actor: 'main', subagentType: e.subagentType, description: e.description, taskId: summary.active?.id ?? null }],
-          await nowIso($),
-        )
-      }).catch(() => undefined)
     }
     return next(e)
   })

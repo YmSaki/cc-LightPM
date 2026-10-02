@@ -210,7 +210,6 @@ export const toTask = (data: { [key: string]: unknown }, body: string): Task => 
       reason: oneOf(defer.reason, DEFER_REASONS, 'defer.reason', true)!,
     }
   }
-  if (typeof data.failures === 'number' && data.failures > 0) task.failures = data.failures
   const notes = asString(data.notes)
   if (notes) task.notes = notes
   return task
@@ -269,7 +268,6 @@ export const serializeTask = (task: Task): string => {
     out.push(`  until: ${task.defer.until}`)
     out.push(`  reason: ${task.defer.reason}`)
   }
-  if (task.failures) out.push(`failures: ${task.failures}`)
   if (task.notes) out.push(`notes: ${scalar(task.notes)}`)
   out.push(`created: ${scalar(task.created)}`)
   out.push(`updated: ${scalar(task.updated)}`)
