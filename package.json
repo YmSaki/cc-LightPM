@@ -1,0 +1,15 @@
+{
+  "name": "lightpm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code plugin + mod: decide the next task by release phase and priority",
+  "scripts": {
+    "test": "npm run test:core && npm run test:mod",
+    "test:core": "node --test \"tests/core/*.spec.ts\"",
+    "test:mod": "claude plugin test .",
+    "validate": "claude plugin validate .",
+    "typecheck": "tsc -p ."
+  },
+  "engines": { "node": ">=22.18" }
+}

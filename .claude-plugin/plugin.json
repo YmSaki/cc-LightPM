@@ -1,0 +1,9 @@
+{
+  "name": "lightpm",
+  "version": "0.1.0",
+  "description": "リリースフェーズ（Alpha → Beta → RC → GM）と優先度（max〜xlow）から「次にやる作業」を規則で1件に決め、範囲外の作業を後回しにさせる",
+  "author": { "name": "ymsaki" },
+  "license": "GPL-3.0",
+  "keywords": ["project-management", "priority", "task", "mod"],
+  "types": "./types/index.d.ts"
+}
