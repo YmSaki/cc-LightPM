@@ -15,6 +15,9 @@ export type Loaded = Snapshot & { errors: string[] }
 
 const join = (root: string, rel: string): string => `${root.replace(/[\\/]+$/, '')}/${rel}`
 
+/** 書き込んで読み戻す試行の最大回数。どの回も一致しなければ失敗にする。 */
+const WRITE_ATTEMPTS = 3
+
 export class Repo {
   readonly fs: Fs
   readonly root: string
@@ -42,7 +45,7 @@ export class Repo {
       await this.fs.write(path, text)
       const back = await this.fs.read(path).catch(() => undefined)
       if (back === text) return
-      if (attempt >= 3) throw new Error(`LightPM: ${rel} の書き込みを確かめられませんでした`)
+      if (attempt >= WRITE_ATTEMPTS) throw new Error(`LightPM: ${rel} の書き込みを確かめられませんでした`)
     }
   }
 

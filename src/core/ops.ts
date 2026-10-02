@@ -289,6 +289,8 @@ export type CompleteResult =
 
 /** 監査ログに残すファイル名の上限（1行が大きくなりすぎないように）。 */
 const LOG_FILES = 200
+/** 同じタスクがこの回数続けて失敗したら、ループを止めて人に報告する。 */
+const MAX_CONSECUTIVE_FAILURES = 2
 
 export const completeTask = (snapshot: Snapshot, input: CompleteInput, now: string, actor = 'main'): Outcome<CompleteResult> => {
   const draft = new Draft(snapshot, now)
@@ -309,7 +311,7 @@ export const completeTask = (snapshot: Snapshot, input: CompleteInput, now: stri
     release()
     draft.put(task)
     draft.log({ event: 'task.failed', actor, taskId: id, failures, notes: notes || null })
-    return draft.outcome({ kind: 'failed', task, failures, stop: failures >= 2 })
+    return draft.outcome({ kind: 'failed', task, failures, stop: failures >= MAX_CONSECUTIVE_FAILURES })
   }
 
   // 完了条件をすべて満たしたか

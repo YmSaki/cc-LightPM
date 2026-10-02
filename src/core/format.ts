@@ -213,14 +213,17 @@ export const formatComplete = (result: CompleteResult): string => {
   }
 }
 
-/** 毎回のプロンプトに足す文脈（600 文字以内）。 */
+/** プロンプトに足す文脈の上限（文字数）。切り詰めるときは末尾の「…」を含めてこの長さに収める。 */
+const CONTEXT_LIMIT = 600
+
+/** 毎回のプロンプトに足す文脈（CONTEXT_LIMIT 文字以内）。 */
 export const contextFor = (summary: Summary): string => {
   const head = `[LightPM] フェーズ ${PHASE_LABEL[summary.phase]}。`
   const body = summary.active
     ? `今やること: ${summary.active.id}「${summary.active.title}」（${summary.active.priority} ${summary.active.kind}）。終わったら mcp__lightpm__pm_complete で報告し、mcp__lightpm__pm_next で次を取る。気づいた別の作業は mcp__lightpm__pm_add で登録すれば、優先度順に回ってくる。`
     : `作業中のタスクはない（todo ${summary.counts.todo}、後回し ${summary.counts.deferred}）。作業を始めるなら mcp__lightpm__pm_next で次のタスクを取る。新しい作業は mcp__lightpm__pm_add で登録する。`
   const text = head + body
-  return text.length <= 600 ? text : `${text.slice(0, 599)}…`
+  return text.length <= CONTEXT_LIMIT ? text : `${text.slice(0, CONTEXT_LIMIT - 1)}…`
 }
 
 export const bandText = (summary: Summary): string => {
