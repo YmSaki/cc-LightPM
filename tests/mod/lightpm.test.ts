@@ -82,9 +82,14 @@ describe('ツール', () => {
     expect(text(await $.tool.call(upd({ id: 'T-0001', check: [2, 3] })))).toBe('更新: T-0001 [max feature] CSV エクスポートを実装する — 完了 3/3')
     expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('status: done')
 
+    // 完了済みのタスクで済みを戻すと、作業中に戻る
+    expect(text(await $.tool.call(upd({ id: 'T-0001', uncheck: [1, 2, 3] })))).toBe('更新: T-0001 [max feature] CSV エクスポートを実装する — 作業中 0/3')
+    expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('status: in_progress')
+    expect(w.files.get(`${ROOT}/.pm/tasks/T-0001.md`)).toContain('- "[ ] ボタンを付ける"')
+
     const log = w.files.get(`${ROOT}/.pm/log/2026-10.jsonl`) ?? ''
     const events = log.trim().split('\n').map(l => JSON.parse(l).event)
-    expect(events).toEqual(['task.created', 'task.created', 'task.progress', 'task.status', 'task.progress', 'task.status'])
+    expect(events).toEqual(['task.created', 'task.created', 'task.progress', 'task.status', 'task.progress', 'task.status', 'task.progress', 'task.status'])
   })
 
   test('入力の誤りはエラーとしてモデルに返す', async ($, on) => {

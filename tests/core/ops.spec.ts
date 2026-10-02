@@ -78,9 +78,7 @@ describe('pm_update', () => {
     assert.equal(all.result.task.status, 'done')
   })
 
-  test('済みを戻すと完了から作業中に戻る。status を指定すればそれを使う', () => {
-    const done = snapshot([task({ id: 'T-0001', status: 'done', checklist: [{ text: 'a', done: true }, { text: 'b', done: true }] })])
-    assert.equal(updateTask(done, { id: 'T-0001', uncheck: [2] }, NOW).result.task.status, 'in_progress')
+  test('status を指定すれば、進捗より指定を優先する', () => {
     assert.equal(updateTask(three(), { id: 'T-0001', check: [1, 2, 3], status: 'in_progress' }, NOW).result.task.status, 'in_progress')
     assert.equal(updateTask(three(), { id: 'T-0001', status: 'dropped' }, NOW).result.task.status, 'dropped')
   })
@@ -107,6 +105,50 @@ describe('pm_update', () => {
   test('依存の循環は拒否する', () => {
     const snap = snapshot([task({ id: 'T-0001', depends_on: ['T-0002'] }), task({ id: 'T-0002' })])
     assert.throws(() => updateTask(snap, { id: 'T-0002', depends_on: ['T-0001'] }, NOW), /循環/)
+  })
+})
+
+describe('完了済みのタスクの済みを戻す（uncheck）', () => {
+  const done = (...checked: boolean[]) =>
+    snapshot([task({ id: 'T-0001', status: 'done', checklist: checked.map((d, i) => ({ text: `項目${i + 1}`, done: d })) })])
+
+  test('一部を戻すと作業中に戻り、進捗と状態の変化が変更履歴に残る', () => {
+    const out = updateTask(done(true, true, true), { id: 'T-0001', uncheck: [3] }, NOW)
+    assert.equal(out.result.task.status, 'in_progress')
+    assert.deepEqual(out.result.task.checklist.map(i => i.done), [true, true, false])
+    assert.deepEqual(out.events, [
+      { event: 'task.progress', actor: 'main', taskId: 'T-0001', done: 2, total: 3 },
+      { event: 'task.status', actor: 'main', taskId: 'T-0001', from: 'done', to: 'in_progress', reason: null },
+    ])
+  })
+
+  test('全部戻しても完了のままにならず、作業中に戻る', () => {
+    const out = updateTask(done(true, true), { id: 'T-0001', uncheck: [1, 2] }, NOW)
+    assert.equal(out.result.task.status, 'in_progress')
+    assert.deepEqual(out.result.task.checklist.map(i => i.done), [false, false])
+  })
+
+  test('項目が1つだけのタスクでも、戻すと作業中に戻る', () => {
+    assert.equal(updateTask(done(true), { id: 'T-0001', uncheck: [1] }, NOW).result.task.status, 'in_progress')
+  })
+
+  test('済んでいない項目を戻しても、進捗が変わらないので完了のまま', () => {
+    const out = updateTask(done(true, false), { id: 'T-0001', uncheck: [2] }, NOW)
+    assert.equal(out.result.task.status, 'done')
+    assert.deepEqual(out.events, [])
+  })
+
+  test('status を同時に指定すれば、それを使う', () => {
+    assert.equal(updateTask(done(true, true), { id: 'T-0001', uncheck: [2], status: 'todo' }, NOW).result.task.status, 'todo')
+  })
+
+  test('戻した項目をもう一度済みにすると、また完了になる', () => {
+    const reopened = updateTask(done(true, true), { id: 'T-0001', uncheck: [1, 2] }, NOW).result.task
+    assert.equal(updateTask(snapshot([reopened]), { id: 'T-0001', check: [1, 2] }, NOW).result.task.status, 'done')
+  })
+
+  test('存在しない項目番号を戻そうとすると拒否する', () => {
+    assert.throws(() => updateTask(done(true), { id: 'T-0001', uncheck: [2] }, NOW), /2 番目/)
   })
 })
 

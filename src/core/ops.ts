@@ -215,9 +215,10 @@ export const updateTask = (snapshot: Snapshot, input: Input, now: string, actor 
   if (status) {
     task.status = status
   } else if (progressChanged && task.status !== 'dropped') {
-    // 状態を指定しなければ、チェックリストの進み具合から決める
+    // 状態を指定しなければ、チェックリストの進み具合から決める。
+    // 完了済みのタスクで済みを戻したときは、残りがいくつでも作業中に戻す
     if (progress.total > 0 && progress.done === progress.total) task.status = 'done'
-    else if (progress.done > 0) task.status = 'in_progress'
+    else if (progress.done > 0 || task.status === 'done') task.status = 'in_progress'
   }
 
   if (Object.keys(changes).length > 0) draft.log({ event: 'task.reclassified', actor, taskId: id, changes, reason })
